@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use sdl3_sys as sys;
 use sys::*;
@@ -27,9 +28,13 @@ pub use gpu::SDL_GPUColorTargetDescription;
 pub use gpu::SDL_GPUTextureFormat;
 pub use gpu::SDL_GPUBufferUsageFlags;
 pub use gpu::SDL_GPUIndexElementSize;
+pub use gpu::SDL_GPUFilter;
+pub use gpu::SDL_GPUTextureUsageFlags;
+pub use gpu::SDL_GPUTextureType;
 pub use sys::pixels::SDL_FColor;
+pub use sys::surface::SDL_FlipMode;
 
-use crate::slot_map::SlotMap;
+use crate::slot_map::{SlotMap, SlotMapRefCell};
 
 pub struct ColorTargetInfo {
     /// The texture that will be used as a color target by a render pass.
@@ -150,6 +155,100 @@ impl DepthStencilTargetInfo {
     }
 }
 
+/// A region of a texture used in a blit operation.
+pub struct BlitRegion {
+    /// The texture.
+    pub texture: Texture,
+    /// The mip level index of the region.
+    pub mip_level: u32,
+    /// The layer index or depth plane of the region.
+    pub layer_or_depth_plane: u32,
+    /// The left offset of the region.
+    pub x: u32,
+    /// The top offset of the region.
+    pub y: u32,
+    /// The width of the region.
+    pub w: u32,
+    /// The height of the region.
+    pub h: u32,
+}
+
+impl BlitRegion {
+    /// Create a blit region covering the full texture.
+    pub fn full(texture: Texture, w: u32, h: u32) -> Self {
+        Self {
+            texture,
+            mip_level: 0,
+            layer_or_depth_plane: 0,
+            x: 0,
+            y: 0,
+            w,
+            h,
+        }
+    }
+
+    pub(crate) fn to_raw(&self, device: &Device) -> gpu::SDL_GPUBlitRegion {
+        gpu::SDL_GPUBlitRegion {
+            texture: device.texture_raw(self.texture),
+            mip_level: self.mip_level,
+            layer_or_depth_plane: self.layer_or_depth_plane,
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        }
+    }
+}
+
+/// Parameters for a blit (texture copy with optional scaling/filtering).
+pub struct BlitInfo {
+    /// The source region for the blit.
+    pub source: BlitRegion,
+    /// The destination region for the blit.
+    pub destination: BlitRegion,
+    /// What is done with the contents of the destination before the blit.
+    pub load_op: SDL_GPULoadOp,
+    /// The color to clear the destination region to before the blit. Ignored if load_op is not CLEAR.
+    pub clear_color: SDL_FColor,
+    /// The flip mode for the source region.
+    pub flip_mode: SDL_FlipMode,
+    /// The filter mode used when blitting.
+    pub filter: SDL_GPUFilter,
+    /// true cycles the destination texture if it is already bound.
+    pub cycle: bool,
+}
+
+impl BlitInfo {
+    /// Create a BlitInfo with sensible defaults (DONT_CARE load, no flip, nearest filter).
+    pub fn new(source: BlitRegion, destination: BlitRegion) -> Self {
+        Self {
+            source,
+            destination,
+            load_op: SDL_GPULoadOp::DONT_CARE,
+            clear_color: SDL_FColor { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            flip_mode: SDL_FlipMode::NONE,
+            filter: SDL_GPUFilter::NEAREST,
+            cycle: false,
+        }
+    }
+
+    #[allow(deprecated)]
+    pub(crate) fn to_raw(&self, device: &Device) -> gpu::SDL_GPUBlitInfo {
+        gpu::SDL_GPUBlitInfo {
+            source: self.source.to_raw(device),
+            destination: self.destination.to_raw(device),
+            load_op: self.load_op,
+            clear_color: self.clear_color,
+            flip_mode: self.flip_mode,
+            filter: self.filter,
+            cycle: self.cycle,
+            padding1: 0,
+            padding2: 0,
+            padding3: 0,
+        }
+    }
+}
+
 pub struct ShaderCreateInfo<'a> {
     /// The shader bytecode.
     pub code: &'a [u8],
@@ -173,12 +272,14 @@ pub struct Device
 {
     inner: *mut gpu::SDL_GPUDevice,
     window : Option<crate::window::Window>,
-    textures: SlotMap<TextureSlot>,
+    textures: SlotMapRefCell<TextureSlot>,
     shaders: SlotMap<ShaderSlot>,
     graphics_pipelines: SlotMap<GraphicsPipelineSlot>,
     buffers: SlotMap<BufferSlot>,
     swapchain: Cell<(*mut gpu::SDL_GPUTexture, u32, u32)>,
     upload_transfer_buffer: Cell<(*mut gpu::SDL_GPUTransferBuffer, u32)>,
+    cmd_buf_count: AtomicU32,
+    pending_transfer_buffers: RefCell<Vec<*mut gpu::SDL_GPUTransferBuffer>>,
 }
 
 impl Device {
@@ -204,18 +305,20 @@ impl Device {
             Ok(Device {
                 inner: sys_device,
                 window,
-                textures: SlotMap::new(),
+                textures: SlotMapRefCell::new(),
                 shaders: SlotMap::new(),
                 graphics_pipelines: SlotMap::new(),
                 buffers: SlotMap::new(),
                 swapchain: Cell::new((std::ptr::null_mut(), 0, 0)),
                 upload_transfer_buffer: Cell::new((std::ptr::null_mut(), 0)),
+                cmd_buf_count: AtomicU32::new(0),
+                pending_transfer_buffers: RefCell::new(Vec::new()),
             })
         }
         
     }
 
-    pub fn create_texture(&mut self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, &'static str> {
+    pub fn create_texture(&self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, &'static str> {
         unsafe {
             let raw = gpu::SDL_CreateGPUTexture(self.inner, info);
             if raw.is_null() {
@@ -230,20 +333,20 @@ impl Device {
         }
     }
 
-    pub fn destroy_texture(&mut self, handle: Texture) {
+    pub fn destroy_texture(&self, handle: Texture) {
         let slot = self.textures.remove(handle.0);
         unsafe {
             gpu::SDL_ReleaseGPUTexture(self.inner, slot.inner);
         }
     }
 
-    pub fn texture_raw(&self, handle: Texture) -> *mut gpu::SDL_GPUTexture {
+    pub(crate) fn texture_raw(&self, handle: Texture) -> *mut gpu::SDL_GPUTexture {
         if handle == Texture::SWAPCHAIN {
             let (ptr, _, _) = self.swapchain.get();
             assert!(!ptr.is_null(), "no swapchain texture acquired");
             return ptr;
         }
-        self.textures.get(handle.0).inner
+        self.textures.with(handle.0, |slot| slot.inner)
     }
 
     pub fn texture_res(&self, handle: Texture) -> (u32, u32) {
@@ -252,7 +355,7 @@ impl Device {
             assert!(!ptr.is_null(), "no swapchain texture acquired");
             return (w, h);
         }
-        self.textures.get(handle.0).res
+        self.textures.with(handle.0, |slot| slot.res)
     }
 
     pub fn create_shader(&mut self, info: &ShaderCreateInfo) -> Result<Shader, &'static str> {
@@ -377,9 +480,9 @@ impl Device {
         if !current.is_null() && current_size >= size {
             return Ok(current);
         }
-        // Release old if it exists
+        // Defer release of the old buffer until no command buffers are in flight.
         if !current.is_null() {
-            unsafe { gpu::SDL_ReleaseGPUTransferBuffer(self.inner, current); }
+            self.pending_transfer_buffers.borrow_mut().push(current);
         }
         let tb_info = gpu::SDL_GPUTransferBufferCreateInfo {
             usage: gpu::SDL_GPUTransferBufferUsage::UPLOAD,
@@ -456,7 +559,21 @@ impl Device {
             if raw.is_null() {
                 return Err("SDL_AcquireGPUCommandBuffer failed");
             }
-            Ok(CommandBuffer { inner: raw, device: self })
+            self.cmd_buf_count.fetch_add(1, Ordering::Relaxed);
+            Ok(CommandBuffer { inner: raw, device: self, submitted: false })
+        }
+    }
+
+    /// Called when a command buffer is submitted or cancelled.
+    /// When no command buffers remain in flight, releases all deferred transfer buffers.
+    fn on_command_buffer_done(&self) {
+        let prev = self.cmd_buf_count.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "command buffer count underflow");
+        if prev == 1 {
+            let mut pending = self.pending_transfer_buffers.borrow_mut();
+            for tb in pending.drain(..) {
+                unsafe { gpu::SDL_ReleaseGPUTransferBuffer(self.inner, tb); }
+            }
         }
     }
 }
@@ -535,6 +652,7 @@ pub struct GraphicsPipelineCreateInfo {
 pub struct CommandBuffer<'a> {
     inner: *mut gpu::SDL_GPUCommandBuffer,
     device: &'a Device,
+    submitted: bool,
 }
 
 impl<'a> CommandBuffer<'a> {
@@ -542,8 +660,12 @@ impl<'a> CommandBuffer<'a> {
         self.inner
     }
 
+    pub fn device(&self) -> &Device {
+        self.device
+    }
+
     pub fn acquire_swapchain_texture(
-        &mut self,
+        &self,
     ) -> Result<Option<Texture>, &'static str> {
         let window = self.device.window.as_ref()
             .ok_or("Device has no window")?;
@@ -551,6 +673,8 @@ impl<'a> CommandBuffer<'a> {
         let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
         let mut width: u32 = 0;
         let mut height: u32 = 0;
+
+        
 
         unsafe {
             let ok = gpu::SDL_AcquireGPUSwapchainTexture(
@@ -573,14 +697,28 @@ impl<'a> CommandBuffer<'a> {
         }
     }
 
-    pub fn submit(self) -> Result<(), &'static str> {
+    pub fn submit(mut self) -> Result<(), &'static str> {
+        // Mark submitted before the call — SDL consumes the command buffer
+        // regardless of success/failure, so Drop must not cancel it.
+        self.submitted = true;
+        self.device.on_command_buffer_done();
         unsafe {
             if !gpu::SDL_SubmitGPUCommandBuffer(self.inner) {
                 return Err("SDL_SubmitGPUCommandBuffer failed");
             }
         }
-        std::mem::forget(self); // don't cancel on drop after successful submit
         Ok(())
+    }
+}
+
+impl<'a> CommandBuffer<'a> {
+    /// Blit from a source texture region to a destination texture region.
+    /// Must not be called inside any pass.
+    pub fn blit_texture(&mut self, info: &BlitInfo) {
+        let raw = info.to_raw(self.device);
+        unsafe {
+            gpu::SDL_BlitGPUTexture(self.inner, &raw);
+        }
     }
 }
 
@@ -594,9 +732,6 @@ impl<'a> CommandBuffer<'a> {
             Ok(CopyPass { inner: raw, _marker: std::marker::PhantomData })
         }
     }
-}
-
-impl<'a> CommandBuffer<'a> {
     pub fn begin_render_pass<'b>(
         &'b mut self,
         color_targets: &[ColorTargetInfo],
@@ -701,8 +836,12 @@ impl Drop for CopyPass<'_> {
 
 impl Drop for CommandBuffer<'_> {
     fn drop(&mut self) {
-        unsafe {
-            gpu::SDL_CancelGPUCommandBuffer(self.inner);
+        self.device.swapchain.set((std::ptr::null_mut(), 0, 0));
+        if !self.submitted {
+            unsafe {
+                gpu::SDL_CancelGPUCommandBuffer(self.inner);
+            }
+            self.device.on_command_buffer_done();
         }
     }
 }
@@ -714,6 +853,9 @@ impl Drop for Device {
             if !tb.is_null() {
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, tb);
             }
+            for pending_tb in self.pending_transfer_buffers.borrow().iter() {
+                gpu::SDL_ReleaseGPUTransferBuffer(self.inner, *pending_tb);
+            }
             for (_, slot) in self.buffers.iter() {
                 gpu::SDL_ReleaseGPUBuffer(self.inner, slot.inner);
             }
@@ -723,9 +865,9 @@ impl Drop for Device {
             for (_, slot) in self.shaders.iter() {
                 gpu::SDL_ReleaseGPUShader(self.inner, slot.inner);
             }
-            for (_, slot) in self.textures.iter() {
+            self.textures.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUTexture(self.inner, slot.inner);
-            }
+            });
             if let Some(window) = &self.window
             {
                 gpu::SDL_ReleaseWindowFromGPUDevice(self.inner, window.raw());

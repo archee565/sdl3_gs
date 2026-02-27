@@ -1,6 +1,7 @@
 #![allow(unused)]
-use sdl3_gs::{device::*};
+use sdl3_gs::device::*;
 use sdl3_gs::event::{Event, WindowEventKind, SDL_Scancode};
+use sdl3_gs::sys::gpu;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -15,15 +16,59 @@ const TRIANGLE_VERTICES: [Vertex; 3] = [
     Vertex { pos: [-0.5,  0.5], color: [0.0, 0.0, 1.0] },
 ];
 
-struct Renderer
-{
-    pipeline : GraphicsPipeline,
-    vertex_buffer: GPUBuffer,
+const SAMPLE_COUNT: SDL_GPUSampleCount = SDL_GPUSampleCount::_4;
+
+struct MsaaTargets {
+    msaa: Texture,
+    resolve: Texture,
+    width: u32,
+    height: u32,
 }
 
-impl Renderer{
-    pub fn new(device : &mut Device) -> Self
-    {
+impl MsaaTargets {
+    fn create(device: &Device, width: u32, height: u32, format: SDL_GPUTextureFormat) -> Self {
+        let msaa = device.create_texture(&gpu::SDL_GPUTextureCreateInfo {
+            r#type: SDL_GPUTextureType::_2D,
+            format,
+            usage: SDL_GPUTextureUsageFlags::COLOR_TARGET,
+            width,
+            height,
+            layer_count_or_depth: 1,
+            num_levels: 1,
+            sample_count: SAMPLE_COUNT,
+            props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
+        }).expect("Failed to create MSAA texture");
+
+        let resolve = device.create_texture(&gpu::SDL_GPUTextureCreateInfo {
+            r#type: SDL_GPUTextureType::_2D,
+            format,
+            usage: SDL_GPUTextureUsageFlags::COLOR_TARGET | SDL_GPUTextureUsageFlags::SAMPLER,
+            width,
+            height,
+            layer_count_or_depth: 1,
+            num_levels: 1,
+            sample_count: SDL_GPUSampleCount::_1,
+            props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
+        }).expect("Failed to create resolve texture");
+
+        Self { msaa, resolve, width, height }
+    }
+
+    fn destroy(&self, device: &Device) {
+        device.destroy_texture(self.msaa);
+        device.destroy_texture(self.resolve);
+    }
+}
+
+struct Renderer {
+    pipeline: GraphicsPipeline,
+    vertex_buffer: GPUBuffer,
+    targets: MsaaTargets,
+    swapchain_format: SDL_GPUTextureFormat,
+}
+
+impl Renderer {
+    pub fn new(device: &mut Device) -> Self {
         let vertex_shader = device.create_shader(&ShaderCreateInfo {
             code: include_bytes!("triangle.vert.spv"),
             entrypoint: "main",
@@ -75,7 +120,13 @@ impl Renderer{
             ],
             primitive_type: SDL_GPUPrimitiveType::TRIANGLELIST,
             rasterizer_state: Default::default(),
-            multisample_state: Default::default(),
+            multisample_state: gpu::SDL_GPUMultisampleState {
+                sample_count: SAMPLE_COUNT,
+                sample_mask: 0,
+                enable_mask: false,
+                enable_alpha_to_coverage: false,
+                ..Default::default()
+            },
             depth_stencil_state: Default::default(),
             color_target_descriptions: vec![SDL_GPUColorTargetDescription {
                 format: swapchain_format,
@@ -103,34 +154,55 @@ impl Renderer{
         device.upload_to_buffer(None, vertex_buffer, 0, vertex_bytes)
             .expect("Failed to upload vertex data");
 
-        Self
-        {
+        // Create initial MSAA targets at a default size (will be recreated on first frame)
+        let targets = MsaaTargets::create(device, 1280, 720, swapchain_format);
+
+        Self {
             pipeline,
             vertex_buffer,
+            targets,
+            swapchain_format,
         }
     }
 
-    fn render_frame(&self, device: &Device) -> Result<(),&'static str> {
+    fn render_frame(&mut self, device: &mut Device) -> Result<(), &'static str> {
         let mut cmd = device.acquire_command_buffer()?;
-        let Some(display) = cmd.acquire_swapchain_texture()? else {
+        let Some(_swapchain) = cmd.acquire_swapchain_texture()? else {
             return Ok(());
         };
 
+        let (sw, sh) = cmd.device().texture_res(Texture::SWAPCHAIN);
 
-        let mut target = ColorTargetInfo::new(display);
+        // Recreate MSAA targets if swapchain size changed
+        if self.targets.width != sw || self.targets.height != sh {
+            self.targets.destroy(device);
+            self.targets = MsaaTargets::create(device, sw, sh, self.swapchain_format);
+        }
+
+        // Render to MSAA target, resolve into resolve texture
+        let mut target = ColorTargetInfo::new(self.targets.msaa);
         target.clear_color = SDL_FColor { r: 0.25, g: 0.5, b: 0.25, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
-        target.store_op = SDL_GPUStoreOp::STORE;
+        target.store_op = SDL_GPUStoreOp::RESOLVE;
+        target.resolve_texture = Some(self.targets.resolve);
+        target.cycle = true;
+        target.cycle_resolve_texture = true;
 
         let pass = cmd.begin_render_pass(&[target], None)?;
         pass.bind_graphics_pipeline(self.pipeline);
         pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: self.vertex_buffer, offset: 0 }]);
         pass.draw_primitives(3, 1, 0, 0);
         drop(pass);
+
+        // Blit resolved texture to swapchain
+        cmd.blit_texture(&BlitInfo::new(
+            BlitRegion::full(self.targets.resolve, sw, sh),
+            BlitRegion::full(Texture::SWAPCHAIN, sw, sh),
+        ));
+
         cmd.submit();
         Ok(())
     }
-
 }
 
 fn main() {
@@ -138,7 +210,7 @@ fn main() {
 
     let window = sdl3_gs::window::Window::create(
         "hello GS", (1280, 720),
-        sdl3_gs::SDL_WindowFlags::default() | sdl3_gs::SDL_WindowFlags::VULKAN).unwrap();
+        sdl3_gs::SDL_WindowFlags::default() | sdl3_gs::SDL_WindowFlags::VULKAN | sdl3_gs::SDL_WindowFlags::RESIZABLE).unwrap();
 
     let mut device = sdl3_gs::device::Device::new(sdl3_gs::device::SDL_GPUShaderFormat::SPIRV, Some(window)).unwrap();
 
@@ -175,7 +247,7 @@ fn main() {
         }
 
 
-        renderer.render_frame(&device);
+        renderer.render_frame(&mut device);
 
     }
 }

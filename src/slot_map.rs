@@ -73,3 +73,51 @@ impl<T> SlotMap<T> {
         })
     }
 }
+
+/// Like [`SlotMap`], but wraps its internals in a `RefCell` so that insert,
+/// remove, and mutable access work through `&self`.
+pub struct SlotMapRefCell<T> {
+    inner: std::cell::RefCell<SlotMap<T>>,
+}
+
+impl<T> SlotMapRefCell<T> {
+    pub fn new() -> Self {
+        Self {
+            inner: std::cell::RefCell::new(SlotMap::new()),
+        }
+    }
+
+    /// Insert a value and return its stable index.
+    pub fn insert(&self, value: T) -> i32 {
+        self.inner.borrow_mut().insert(value)
+    }
+
+    /// Remove the entry at `index`, returning the value.
+    ///
+    /// # Panics
+    /// Panics if the slot is already free or if the inner `RefCell` is already borrowed.
+    pub fn remove(&self, index: i32) -> T {
+        self.inner.borrow_mut().remove(index)
+    }
+
+    /// Immutably borrow the value at `index`, passing it to the closure `f`.
+    pub fn with<R>(&self, index: i32, f: impl FnOnce(&T) -> R) -> R {
+        let borrow = self.inner.borrow();
+        f(borrow.get(index))
+    }
+
+    /// Mutably borrow the value at `index`, passing it to the closure `f`.
+    pub fn with_mut<R>(&self, index: i32, f: impl FnOnce(&mut T) -> R) -> R {
+        let mut borrow = self.inner.borrow_mut();
+        f(borrow.get_mut(index))
+    }
+
+    /// Iterate over all occupied entries via a closure (since we can't return
+    /// references into the `RefCell`).
+    pub fn for_each(&self, mut f: impl FnMut(i32, &T)) {
+        let borrow = self.inner.borrow();
+        for (i, v) in borrow.iter() {
+            f(i, v);
+        }
+    }
+}
