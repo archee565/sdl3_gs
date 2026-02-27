@@ -1,6 +1,7 @@
-# sdl3_gs
+# sdl3_gs   SDL3 wrapper by Gravitysensation
 
 A safe Rust wrapper around SDL3's GPU API.
+Work in progress
 
 ## Goal
 
