@@ -10,6 +10,7 @@ categories = ["game-development", "graphics", "rendering"]
 
 [dependencies]
 sdl3-sys = { version = "0.6.1" }
+bytemuck = { version = "1", features = ["derive"] }
 
 [lib]
 name = "sdl3_gs"

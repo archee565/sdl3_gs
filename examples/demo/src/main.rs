@@ -5,19 +5,34 @@ use sdl3_gs::event::{Event, WindowEventKind, SDL_Scancode};
 use sdl3_gs::sys::gpu;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     pos: [f32; 2],
-    color: [f32; 3],
+    uv: [f32; 2],
 }
 
-const TRIANGLE_VERTICES: [Vertex; 3] = [
-    Vertex { pos: [ 0.0, -0.5], color: [1.0, 0.0, 0.0] },
-    Vertex { pos: [ 0.5,  0.5], color: [0.0, 1.0, 0.0] },
-    Vertex { pos: [-0.5,  0.5], color: [0.0, 0.0, 1.0] },
+const QUAD_VERTICES: [Vertex; 4] = [
+    Vertex { pos: [-1.0, -1.0], uv: [0.0, 0.0] },
+    Vertex { pos: [ 1.0, -1.0], uv: [1.0, 0.0] },
+    Vertex { pos: [ 1.0,  1.0], uv: [1.0, 1.0] },
+    Vertex { pos: [-1.0,  1.0], uv: [0.0, 1.0] },
 ];
 
+const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
+
 const SAMPLE_COUNT: SDL_GPUSampleCount = SDL_GPUSampleCount::_4;
+
+fn generate_checkerboard(width: u32, height: u32, cell_size: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let is_white = ((x / cell_size) + (y / cell_size)) % 2 == 0;
+            let c = if is_white { 255u8 } else { 64u8 };
+            pixels.extend_from_slice(&[c, c, c, 255]);
+        }
+    }
+    pixels
+}
 
 struct MsaaTargets {
     msaa: Texture,
@@ -64,6 +79,9 @@ impl MsaaTargets {
 struct Renderer {
     pipeline: GraphicsPipeline,
     vertex_buffer: GPUBuffer,
+    index_buffer: GPUBuffer,
+    checkerboard_texture: Texture,
+    sampler: Sampler,
     targets: MsaaTargets,
     swapchain_format: SDL_GPUTextureFormat,
 }
@@ -71,7 +89,7 @@ struct Renderer {
 impl Renderer {
     pub fn new(device: &mut Device) -> Self {
         let vertex_shader = device.create_shader(&ShaderCreateInfo {
-            code: include_bytes!("triangle.vert.spv"),
+            code: include_bytes!("textured.vert.spv"),
             entrypoint: "main",
             format: SDL_GPUShaderFormat::SPIRV,
             stage: SDL_GPUShaderStage::VERTEX,
@@ -82,14 +100,14 @@ impl Renderer {
         }).expect("Failed to create vertex shader");
 
         let fragment_shader = device.create_shader(&ShaderCreateInfo {
-            code: include_bytes!("triangle.frag.spv"),
+            code: include_bytes!("textured.frag.spv"),
             entrypoint: "main",
             format: SDL_GPUShaderFormat::SPIRV,
             stage: SDL_GPUShaderStage::FRAGMENT,
-            num_samplers: 0,
+            num_samplers: 1,
             num_storage_textures: 0,
             num_storage_buffers: 0,
-            num_uniform_buffers: 0,
+            num_uniform_buffers: 1,
         }).expect("Failed to create fragment shader");
 
         let swapchain_format = device.get_swapchain_texture_format();
@@ -107,7 +125,7 @@ impl Renderer {
                 SDL_GPUVertexAttribute {
                     location: 1,
                     buffer_slot: 0,
-                    format: SDL_GPUVertexElementFormat::FLOAT3,
+                    format: SDL_GPUVertexElementFormat::FLOAT2,
                     offset: (std::mem::size_of::<[f32; 2]>()) as u32,
                 },
             ],
@@ -140,24 +158,70 @@ impl Renderer {
         device.destroy_shader(vertex_shader);
         device.destroy_shader(fragment_shader);
 
-        let vertex_data_size = std::mem::size_of_val(&TRIANGLE_VERTICES) as u32;
+        // Vertex buffer
+        let vertex_data_size = std::mem::size_of_val(&QUAD_VERTICES) as u32;
         let vertex_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::VERTEX, vertex_data_size)
             .expect("Failed to create vertex buffer");
-
-        let vertex_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                TRIANGLE_VERTICES.as_ptr() as *const u8,
-                vertex_data_size as usize,
-            )
-        };
-        device.upload_to_buffer(None, vertex_buffer, 0, vertex_bytes)
+        device.upload_to_buffer(None, vertex_buffer, 0, bytemuck::cast_slice(&QUAD_VERTICES))
             .expect("Failed to upload vertex data");
+
+        // Index buffer
+        let index_data_size = std::mem::size_of_val(&QUAD_INDICES) as u32;
+        let index_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::INDEX, index_data_size)
+            .expect("Failed to create index buffer");
+        device.upload_to_buffer(None, index_buffer, 0, bytemuck::cast_slice(&QUAD_INDICES))
+            .expect("Failed to upload index data");
+
+        // Checkerboard texture
+        let tex_size = 256u32;
+        let cell_size = 32u32;
+        let pixels = generate_checkerboard(tex_size, tex_size, cell_size);
+
+        let checkerboard_texture = device.create_texture(&gpu::SDL_GPUTextureCreateInfo {
+            r#type: SDL_GPUTextureType::_2D,
+            format: SDL_GPUTextureFormat::R8G8B8A8_UNORM,
+            usage: SDL_GPUTextureUsageFlags::SAMPLER,
+            width: tex_size,
+            height: tex_size,
+            layer_count_or_depth: 1,
+            num_levels: 1,
+            sample_count: SDL_GPUSampleCount::_1,
+            props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
+        }).expect("Failed to create checkerboard texture");
+
+        let region = TextureRegion::full(checkerboard_texture, device);
+        device.upload_to_texture(None, &region, &pixels)
+            .expect("Failed to upload checkerboard data");
+
+        // Sampler
+        #[allow(deprecated)]
+        let sampler = device.create_sampler(&gpu::SDL_GPUSamplerCreateInfo {
+            min_filter: SDL_GPUFilter::LINEAR,
+            mag_filter: SDL_GPUFilter::LINEAR,
+            mipmap_mode: SDL_GPUSamplerMipmapMode::LINEAR,
+            address_mode_u: SDL_GPUSamplerAddressMode::REPEAT,
+            address_mode_v: SDL_GPUSamplerAddressMode::REPEAT,
+            address_mode_w: SDL_GPUSamplerAddressMode::REPEAT,
+            mip_lod_bias: 0.0,
+            max_anisotropy: 1.0,
+            compare_op: SDL_GPUCompareOp::NEVER,
+            min_lod: 0.0,
+            max_lod: 0.0,
+            enable_anisotropy: false,
+            enable_compare: false,
+            padding1: 0,
+            padding2: 0,
+            props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
+        }).expect("Failed to create sampler");
 
         let targets = MsaaTargets::create(device, 1280, 720, swapchain_format);
 
         Self {
             pipeline,
             vertex_buffer,
+            index_buffer,
+            checkerboard_texture,
+            sampler,
             targets,
             swapchain_format,
         }
@@ -177,7 +241,7 @@ impl Renderer {
         }
 
         let mut target = ColorTargetInfo::new(self.targets.msaa);
-        target.clear_color = SDL_FColor { r: 0.25, g: 0.5, b: 0.25, a: 1.0 };
+        target.clear_color = SDL_FColor { r: 0.1, g: 0.1, b: 0.1, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
         target.store_op = SDL_GPUStoreOp::RESOLVE;
         target.resolve_texture = Some(self.targets.resolve);
@@ -187,7 +251,14 @@ impl Renderer {
         let pass = cmd.begin_render_pass(&[target], None)?;
         pass.bind_graphics_pipeline(self.pipeline);
         pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: self.vertex_buffer, offset: 0 }]);
-        pass.draw_primitives(3, 1, 0, 0);
+        pass.bind_index_buffer(&GPUBufferBinding { buffer: self.index_buffer, offset: 0 }, SDL_GPUIndexElementSize::_16BIT);
+        pass.bind_fragment_samplers(0, &[TextureSamplerBinding {
+            texture: self.checkerboard_texture,
+            sampler: self.sampler,
+        }]);
+        let tint_color: [f32; 4] = [1.0, 0.8, 0.5, 1.0];
+        pass.push_fragment_uniform_data(0, &tint_color);
+        pass.draw_indexed_primitives(6, 1, 0, 0, 0);
         drop(pass);
 
         cmd.blit_texture(&BlitInfo::new(
@@ -198,6 +269,54 @@ impl Renderer {
         cmd.submit();
         Ok(())
     }
+}
+
+fn run_compute_fill(device: &Device) {
+    let pipeline = device.create_compute_pipeline(&ComputePipelineCreateInfo {
+        code: include_bytes!("fill_array.comp.spv"),
+        entrypoint: "main",
+        format: SDL_GPUShaderFormat::SPIRV,
+        num_samplers: 0,
+        num_readonly_storage_textures: 0,
+        num_readonly_storage_buffers: 0,
+        num_readwrite_storage_textures: 0,
+        num_readwrite_storage_buffers: 1,
+        num_uniform_buffers: 0,
+        threadcount_x: 64,
+        threadcount_y: 1,
+        threadcount_z: 1,
+    }).expect("Failed to create compute pipeline");
+
+    let buffer = device.create_buffer(
+        SDL_GPUBufferUsageFlags::COMPUTE_STORAGE_WRITE,
+        256 * std::mem::size_of::<u32>() as u32,
+    ).expect("Failed to create compute buffer");
+
+    let mut cmd = device.acquire_command_buffer().expect("Failed to acquire command buffer");
+    {
+        let pass = cmd.begin_compute_pass(
+            &[],
+            &[StorageBufferReadWriteBinding { buffer, cycle: false }],
+        ).expect("Failed to begin compute pass");
+        pass.bind_compute_pipeline(pipeline);
+        pass.dispatch(256 / 64, 1, 1);
+    }
+    cmd.submit().expect("Failed to submit compute command buffer");
+
+    let data = device.download_from_buffer(buffer, 0, 0)
+        .expect("Failed to download buffer");
+    let values: &[u32] = bytemuck::cast_slice(&data);
+    println!("Compute shader output ({} values):", values.len());
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 && i % 16 == 0 {
+            println!();
+        }
+        print!("{v:4}");
+    }
+    println!();
+
+    device.destroy_buffer(buffer);
+    device.destroy_compute_pipeline(pipeline);
 }
 
 struct DemoApp {
@@ -220,6 +339,8 @@ impl App for DemoApp {
             .map_err(|e| e.to_string())?;
 
         let renderer = Renderer::new(&mut device);
+
+        run_compute_fill(&device);
 
         Ok(DemoApp { device, renderer })
     }
@@ -256,4 +377,3 @@ impl App for DemoApp {
 }
 
 sdl3_gs::sdl3_main!(DemoApp);
-
