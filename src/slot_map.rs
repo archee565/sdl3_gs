@@ -11,13 +11,16 @@ enum SlotEntry<T> {
     Free { next_free: i32 },
 }
 
-impl<T> SlotMap<T> {
-    pub fn new() -> Self {
+impl<T> Default for SlotMap<T> {
+    fn default() -> Self {
         Self {
             slots: Vec::new(),
             first_free: -1,
         }
     }
+}
+
+impl<T> SlotMap<T> {
 
     /// Insert a value and return its stable index.
     pub fn insert(&mut self, value: T) -> i32 {
@@ -80,12 +83,15 @@ pub struct SlotMapRefCell<T> {
     inner: std::cell::RefCell<SlotMap<T>>,
 }
 
-impl<T> SlotMapRefCell<T> {
-    pub fn new() -> Self {
+impl<T> Default for SlotMapRefCell<T> {
+    fn default() -> Self {
         Self {
-            inner: std::cell::RefCell::new(SlotMap::new()),
+            inner: std::cell::RefCell::new(SlotMap::default()),
         }
     }
+}
+
+impl<T> SlotMapRefCell<T> {
 
     /// Insert a value and return its stable index.
     pub fn insert(&self, value: T) -> i32 {

@@ -26,7 +26,7 @@ fn generate_checkerboard(width: u32, height: u32, cell_size: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
-            let is_white = ((x / cell_size) + (y / cell_size)) % 2 == 0;
+            let is_white = ((x / cell_size) + (y / cell_size)).is_multiple_of(2);
             let c = if is_white { 255u8 } else { 64u8 };
             pixels.extend_from_slice(&[c, c, c, 255]);
         }
@@ -306,14 +306,18 @@ fn run_compute_fill(device: &Device) {
     let data = device.download_from_buffer(buffer, 0, 0)
         .expect("Failed to download buffer");
     let values: &[u32] = bytemuck::cast_slice(&data);
-    println!("Compute shader output ({} values):", values.len());
-    for (i, v) in values.iter().enumerate() {
-        if i > 0 && i % 16 == 0 {
-            println!();
+    
+    if false 
+    {
+        println!("Compute shader output ({} values):", values.len());
+        for (i, v) in values.iter().enumerate() {
+            if i > 0 && i % 16 == 0 {
+                println!();
+            }
+            print!("{v:4}");
         }
-        print!("{v:4}");
+        println!();
     }
-    println!();
 
     device.destroy_buffer(buffer);
     device.destroy_compute_pipeline(pipeline);

@@ -77,7 +77,11 @@ unsafe extern "C" fn app_quit<T: App>(
 /// Enter the SDL3 callback-based main loop with the given argc/argv.
 /// Returns the process exit code. This is the raw entry point used by
 /// [`run`] and [`sdl3_main!`].
-pub fn enter_main_callbacks<T: App>(
+///
+/// # Safety
+///
+/// `argc` and `argv` must be valid C main arguments.
+pub unsafe fn enter_main_callbacks<T: App>(
     argc: core::ffi::c_int,
     argv: *mut *mut core::ffi::c_char,
 ) -> core::ffi::c_int {
@@ -99,8 +103,11 @@ pub fn enter_main_callbacks<T: App>(
 /// until one of them signals quit, at which point `T::quit` is called and the
 /// process exits.
 pub fn run<T: App>() -> ! {
-    let rc = enter_main_callbacks::<T>(0, std::ptr::null_mut());
-    std::process::exit(rc)
+    unsafe
+    {
+        let rc = enter_main_callbacks::<T>(0, std::ptr::null_mut());        
+        std::process::exit(rc)
+    }
 }
 
 /// Define an `SDL_main` entry point for the given [`App`] type.
@@ -121,7 +128,7 @@ macro_rules! sdl3_main {
             argc: ::core::ffi::c_int,
             argv: *mut *mut ::core::ffi::c_char,
         ) -> ::core::ffi::c_int {
-            $crate::callbacks::enter_main_callbacks::<$app>(argc, argv)
+            unsafe { $crate::callbacks::enter_main_callbacks::<$app>(argc, argv) }
         }
 
         fn main() {
