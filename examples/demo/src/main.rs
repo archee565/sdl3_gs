@@ -255,6 +255,5 @@ impl App for DemoApp {
     fn quit(&mut self) {}
 }
 
-fn main() {
-    sdl3_gs::callbacks::run::<DemoApp>();
-}
+sdl3_gs::sdl3_main!(DemoApp);
+

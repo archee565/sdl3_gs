@@ -4,7 +4,6 @@ pub mod event;
 pub mod slot_map;
 pub mod window;
 pub mod tools;
-#[cfg(feature = "callbacks")]
 pub mod callbacks;
 
 pub use sdl3_sys as sys;

@@ -8,10 +8,6 @@ repository = "https://github.com/archee565/sdl3_gs.git"
 keywords = ["sdl3", "gpu", "graphics", "gamedev"]
 categories = ["game-development", "graphics", "rendering"]
 
-[features]
-default = ["callbacks"]
-callbacks = []
-
 [dependencies]
 sdl3-sys = { version = "0.6.1" }
 
