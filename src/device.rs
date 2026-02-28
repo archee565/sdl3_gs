@@ -34,7 +34,7 @@ pub use gpu::SDL_GPUTextureType;
 pub use sys::pixels::SDL_FColor;
 pub use sys::surface::SDL_FlipMode;
 
-use crate::slot_map::{SlotMap, SlotMapRefCell};
+use crate::slot_map::SlotMapRefCell;
 
 pub struct ColorTargetInfo {
     /// The texture that will be used as a color target by a render pass.
@@ -273,9 +273,9 @@ pub struct Device
     inner: *mut gpu::SDL_GPUDevice,
     window : Option<crate::window::Window>,
     textures: SlotMapRefCell<TextureSlot>,
-    shaders: SlotMap<ShaderSlot>,
-    graphics_pipelines: SlotMap<GraphicsPipelineSlot>,
-    buffers: SlotMap<BufferSlot>,
+    shaders: SlotMapRefCell<ShaderSlot>,
+    graphics_pipelines: SlotMapRefCell<GraphicsPipelineSlot>,
+    buffers: SlotMapRefCell<BufferSlot>,
     swapchain: Cell<(*mut gpu::SDL_GPUTexture, u32, u32)>,
     upload_transfer_buffer: Cell<(*mut gpu::SDL_GPUTransferBuffer, u32)>,
     cmd_buf_count: AtomicU32,
@@ -306,9 +306,9 @@ impl Device {
                 inner: sys_device,
                 window,
                 textures: SlotMapRefCell::new(),
-                shaders: SlotMap::new(),
-                graphics_pipelines: SlotMap::new(),
-                buffers: SlotMap::new(),
+                shaders: SlotMapRefCell::new(),
+                graphics_pipelines: SlotMapRefCell::new(),
+                buffers: SlotMapRefCell::new(),
                 swapchain: Cell::new((std::ptr::null_mut(), 0, 0)),
                 upload_transfer_buffer: Cell::new((std::ptr::null_mut(), 0)),
                 cmd_buf_count: AtomicU32::new(0),
@@ -358,7 +358,7 @@ impl Device {
         self.textures.with(handle.0, |slot| slot.res)
     }
 
-    pub fn create_shader(&mut self, info: &ShaderCreateInfo) -> Result<Shader, &'static str> {
+    pub fn create_shader(&self, info: &ShaderCreateInfo) -> Result<Shader, &'static str> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
             .map_err(|_| "entrypoint contains interior nul byte")?;
         let raw_info = gpu::SDL_GPUShaderCreateInfo {
@@ -383,7 +383,7 @@ impl Device {
         }
     }
 
-    pub fn destroy_shader(&mut self, handle: Shader) {
+    pub fn destroy_shader(&self, handle: Shader) {
         let slot = self.shaders.remove(handle.0);
         unsafe {
             gpu::SDL_ReleaseGPUShader(self.inner, slot.inner);
@@ -391,10 +391,12 @@ impl Device {
     }
 
     #[allow(deprecated)]
-    pub fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, &'static str> {
+    pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, &'static str> {
+        let vertex_shader_raw = self.shaders.with(info.vertex_shader.0, |s| s.inner);
+        let fragment_shader_raw = self.shaders.with(info.fragment_shader.0, |s| s.inner);
         let raw_info = gpu::SDL_GPUGraphicsPipelineCreateInfo {
-            vertex_shader: self.shaders.get(info.vertex_shader.0).inner,
-            fragment_shader: self.shaders.get(info.fragment_shader.0).inner,
+            vertex_shader: vertex_shader_raw,
+            fragment_shader: fragment_shader_raw,
             vertex_input_state: gpu::SDL_GPUVertexInputState {
                 vertex_buffer_descriptions: if info.vertex_buffer_descriptions.is_empty() {
                     std::ptr::null()
@@ -439,14 +441,14 @@ impl Device {
         }
     }
 
-    pub fn destroy_graphics_pipeline(&mut self, handle: GraphicsPipeline) {
+    pub fn destroy_graphics_pipeline(&self, handle: GraphicsPipeline) {
         let slot = self.graphics_pipelines.remove(handle.0);
         unsafe {
             gpu::SDL_ReleaseGPUGraphicsPipeline(self.inner, slot.inner);
         }
     }
 
-    pub fn create_buffer(&mut self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, &'static str> {
+    pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, &'static str> {
         let info = gpu::SDL_GPUBufferCreateInfo {
             usage,
             size,
@@ -462,7 +464,7 @@ impl Device {
         }
     }
 
-    pub fn destroy_buffer(&mut self, handle: GPUBuffer) {
+    pub fn destroy_buffer(&self, handle: GPUBuffer) {
         let slot = self.buffers.remove(handle.0);
         unsafe {
             gpu::SDL_ReleaseGPUBuffer(self.inner, slot.inner);
@@ -470,7 +472,7 @@ impl Device {
     }
 
     pub(crate) fn buffer_raw(&self, handle: GPUBuffer) -> *mut gpu::SDL_GPUBuffer {
-        self.buffers.get(handle.0).inner
+        self.buffers.with(handle.0, |slot| slot.inner)
     }
 
     /// Ensure the internal upload transfer buffer is at least `size` bytes.
@@ -791,7 +793,7 @@ impl RenderPass<'_> {
         unsafe {
             gpu::SDL_BindGPUGraphicsPipeline(
                 self.inner,
-                self.device.graphics_pipelines.get(pipeline.0).inner,
+                self.device.graphics_pipelines.with(pipeline.0, |slot| slot.inner),
             );
         }
     }
@@ -856,15 +858,15 @@ impl Drop for Device {
             for pending_tb in self.pending_transfer_buffers.borrow().iter() {
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, *pending_tb);
             }
-            for (_, slot) in self.buffers.iter() {
+            self.buffers.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUBuffer(self.inner, slot.inner);
-            }
-            for (_, slot) in self.graphics_pipelines.iter() {
+            });
+            self.graphics_pipelines.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUGraphicsPipeline(self.inner, slot.inner);
-            }
-            for (_, slot) in self.shaders.iter() {
+            });
+            self.shaders.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUShader(self.inner, slot.inner);
-            }
+            });
             self.textures.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUTexture(self.inner, slot.inner);
             });

@@ -165,7 +165,7 @@ impl Renderer {
         }
     }
 
-    fn render_frame(&mut self, device: &mut Device) -> Result<(), &'static str> {
+    fn render_frame(&mut self, device: &Device) -> Result<(), &'static str> {
         let mut cmd = device.acquire_command_buffer()?;
         let Some(_swapchain) = cmd.acquire_swapchain_texture()? else {
             return Ok(());
