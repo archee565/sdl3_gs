@@ -137,7 +137,7 @@ impl Iterator for PollEventIter {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn parse_event(raw: &SDL_Event) -> Event {
+pub(crate) fn parse_event(raw: &SDL_Event) -> Event {
     let event_type = raw.event_type();
 
     match event_type {

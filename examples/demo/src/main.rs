@@ -1,4 +1,5 @@
 #![allow(unused)]
+use sdl3_gs::callbacks::App;
 use sdl3_gs::device::*;
 use sdl3_gs::event::{Event, WindowEventKind, SDL_Scancode};
 use sdl3_gs::sys::gpu;
@@ -139,12 +140,10 @@ impl Renderer {
         device.destroy_shader(vertex_shader);
         device.destroy_shader(fragment_shader);
 
-        // Create vertex buffer
         let vertex_data_size = std::mem::size_of_val(&TRIANGLE_VERTICES) as u32;
         let vertex_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::VERTEX, vertex_data_size)
             .expect("Failed to create vertex buffer");
 
-        // Upload vertex data
         let vertex_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(
                 TRIANGLE_VERTICES.as_ptr() as *const u8,
@@ -154,7 +153,6 @@ impl Renderer {
         device.upload_to_buffer(None, vertex_buffer, 0, vertex_bytes)
             .expect("Failed to upload vertex data");
 
-        // Create initial MSAA targets at a default size (will be recreated on first frame)
         let targets = MsaaTargets::create(device, 1280, 720, swapchain_format);
 
         Self {
@@ -173,13 +171,11 @@ impl Renderer {
 
         let (sw, sh) = cmd.device().texture_res(Texture::SWAPCHAIN);
 
-        // Recreate MSAA targets if swapchain size changed
         if self.targets.width != sw || self.targets.height != sh {
             self.targets.destroy(device);
             self.targets = MsaaTargets::create(device, sw, sh, self.swapchain_format);
         }
 
-        // Render to MSAA target, resolve into resolve texture
         let mut target = ColorTargetInfo::new(self.targets.msaa);
         target.clear_color = SDL_FColor { r: 0.25, g: 0.5, b: 0.25, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
@@ -194,7 +190,6 @@ impl Renderer {
         pass.draw_primitives(3, 1, 0, 0);
         drop(pass);
 
-        // Blit resolved texture to swapchain
         cmd.blit_texture(&BlitInfo::new(
             BlitRegion::full(self.targets.resolve, sw, sh),
             BlitRegion::full(Texture::SWAPCHAIN, sw, sh),
@@ -205,49 +200,61 @@ impl Renderer {
     }
 }
 
-fn main() {
-    sdl3_gs::sdl_init(sdl3_gs::SDL_INIT_VIDEO);
+struct DemoApp {
+    device: Device,
+    renderer: Renderer,
+}
 
-    let window = sdl3_gs::window::Window::create(
-        "hello GS", (1280, 720),
-        sdl3_gs::SDL_WindowFlags::default() | sdl3_gs::SDL_WindowFlags::VULKAN | sdl3_gs::SDL_WindowFlags::RESIZABLE).unwrap();
+impl App for DemoApp {
+    fn init() -> Result<Self, String> {
+        sdl3_gs::sdl_init(sdl3_gs::SDL_INIT_VIDEO);
 
-    let mut device = sdl3_gs::device::Device::new(sdl3_gs::device::SDL_GPUShaderFormat::SPIRV, Some(window)).unwrap();
+        let window = sdl3_gs::window::Window::create(
+            "hello GS", (1280, 720),
+            sdl3_gs::SDL_WindowFlags::default()
+                | sdl3_gs::SDL_WindowFlags::VULKAN
+                | sdl3_gs::SDL_WindowFlags::RESIZABLE,
+        )?;
 
-    let mut renderer = Renderer::new(&mut device);
+        let mut device = Device::new(SDL_GPUShaderFormat::SPIRV, Some(window))
+            .map_err(|e| e.to_string())?;
 
-    let mut running = true;
-    while running {
-        for event in sdl3_gs::event::poll_events() {
-            match event {
-                Event::Quit { .. } => running = false,
+        let renderer = Renderer::new(&mut device);
 
-                Event::Window { kind: WindowEventKind::CloseRequested, .. } => running = false,
-
-                Event::KeyDown { scancode, repeat, .. } => {
-                    if scancode == SDL_Scancode::ESCAPE {
-                        running = false;
-                    }
-                    if !repeat {
-                        println!("Key pressed: {:?}", scancode.0);
-                    }
-                }
-
-                Event::MouseButtonDown { button, x, y, .. } => {
-                    println!("Mouse button {} down at ({}, {})", button, x, y);
-                }
-
-                Event::MouseMotion { x, y, .. } => {
-                    // Uncomment to see mouse motion:
-                    // println!("Mouse at ({}, {})", x, y);
-                }
-
-                _ => {}
-            }
-        }
-
-
-        renderer.render_frame(&mut device);
-
+        Ok(DemoApp { device, renderer })
     }
+
+    fn iterate(&mut self) -> bool {
+        if let Err(e) = self.renderer.render_frame(&self.device) {
+            eprintln!("Render error: {e}");
+            return false;
+        }
+        true
+    }
+
+    fn event(&mut self, event: Event) -> bool {
+        match event {
+            Event::Quit { .. } => return false,
+            Event::Window { kind: WindowEventKind::CloseRequested, .. } => return false,
+            Event::KeyDown { scancode, repeat, .. } => {
+                if scancode == SDL_Scancode::ESCAPE {
+                    return false;
+                }
+                if !repeat {
+                    println!("Key pressed: {:?}", scancode.0);
+                }
+            }
+            Event::MouseButtonDown { button, x, y, .. } => {
+                println!("Mouse button {} down at ({}, {})", button, x, y);
+            }
+            _ => {}
+        }
+        true
+    }
+
+    fn quit(&mut self) {}
+}
+
+fn main() {
+    sdl3_gs::callbacks::run::<DemoApp>();
 }
