@@ -87,7 +87,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(device: &mut Device) -> Self {
+    pub fn new(device: &Device) -> Self {
         let vertex_shader = device.create_shader(&ShaderCreateInfo {
             code: include_bytes!("textured.vert.spv"),
             entrypoint: "main",
