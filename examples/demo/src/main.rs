@@ -18,7 +18,7 @@ const QUAD_VERTICES: [Vertex; 4] = [
     Vertex { pos: [-1.0,  1.0], uv: [0.0, 1.0] },
 ];
 
-const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
+const QUAD_INDICES: [u16; 3] = [0, 1, 2];//, 2, 3, 0];
 
 const SAMPLE_COUNT: SDL_GPUSampleCount = SDL_GPUSampleCount::_4;
 
@@ -43,7 +43,7 @@ struct MsaaTargets {
 
 impl MsaaTargets {
     fn create(device: &Device, width: u32, height: u32, format: SDL_GPUTextureFormat) -> Self {
-        let msaa = device.create_texture(&gpu::SDL_GPUTextureCreateInfo {
+        let msaa = device.create_texture(&SDL_GPUTextureCreateInfo {
             r#type: SDL_GPUTextureType::_2D,
             format,
             usage: SDL_GPUTextureUsageFlags::COLOR_TARGET,
@@ -55,7 +55,7 @@ impl MsaaTargets {
             props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
         }).expect("Failed to create MSAA texture");
 
-        let resolve = device.create_texture(&gpu::SDL_GPUTextureCreateInfo {
+        let resolve = device.create_texture(&SDL_GPUTextureCreateInfo {
             r#type: SDL_GPUTextureType::_2D,
             format,
             usage: SDL_GPUTextureUsageFlags::COLOR_TARGET | SDL_GPUTextureUsageFlags::SAMPLER,
@@ -70,9 +70,9 @@ impl MsaaTargets {
         Self { msaa, resolve, width, height }
     }
 
-    fn destroy(&self, device: &Device) {
-        device.destroy_texture(self.msaa);
-        device.destroy_texture(self.resolve);
+    fn destroy(&mut self, device: &Device) {
+        self.msaa.destroy(device);
+        self.resolve.destroy(device);
     }
 }
 
@@ -88,7 +88,7 @@ struct Renderer {
 
 impl Renderer {
     pub fn new(device: &Device) -> Self {
-        let vertex_shader = device.create_shader(&ShaderCreateInfo {
+        let mut vertex_shader = device.create_shader(&ShaderCreateInfo {
             code: include_bytes!("textured.vert.spv"),
             entrypoint: "main",
             format: SDL_GPUShaderFormat::SPIRV,
@@ -99,7 +99,7 @@ impl Renderer {
             num_uniform_buffers: 0,
         }).expect("Failed to create vertex shader");
 
-        let fragment_shader = device.create_shader(&ShaderCreateInfo {
+        let mut fragment_shader = device.create_shader(&ShaderCreateInfo {
             code: include_bytes!("textured.frag.spv"),
             entrypoint: "main",
             format: SDL_GPUShaderFormat::SPIRV,
@@ -139,7 +139,7 @@ impl Renderer {
             ],
             primitive_type: SDL_GPUPrimitiveType::TRIANGLELIST,
             rasterizer_state: Default::default(),
-            multisample_state: gpu::SDL_GPUMultisampleState {
+            multisample_state: SDL_GPUMultisampleState {
                 sample_count: SAMPLE_COUNT,
                 sample_mask: 0,
                 enable_mask: false,
@@ -155,8 +155,8 @@ impl Renderer {
             has_depth_stencil_target: false,
         }).expect("Failed to create graphics pipeline");
 
-        device.destroy_shader(vertex_shader);
-        device.destroy_shader(fragment_shader);
+        vertex_shader.destroy(device);
+        fragment_shader.destroy(device);
 
         // Vertex buffer
         let vertex_data_size = std::mem::size_of_val(&QUAD_VERTICES) as u32;
@@ -244,7 +244,7 @@ impl Renderer {
         target.clear_color = SDL_FColor { r: 0.1, g: 0.1, b: 0.1, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
         target.store_op = SDL_GPUStoreOp::RESOLVE;
-        target.resolve_texture = Some(self.targets.resolve);
+        target.resolve_texture = Some(Texture::SWAPCHAIN);
         target.cycle = true;
         target.cycle_resolve_texture = true;
 
@@ -257,14 +257,14 @@ impl Renderer {
             sampler: self.sampler,
         }]);
         let tint_color: [f32; 4] = [1.0, 0.8, 0.5, 1.0];
-        pass.push_fragment_uniform_data(0, &tint_color);
+        pass.push_fragment_uniform_data(0, bytemuck::cast_slice(&tint_color));
         pass.draw_indexed_primitives(6, 1, 0, 0, 0);
         drop(pass);
 
-        cmd.blit_texture(&BlitInfo::new(
-            BlitRegion::full(self.targets.resolve, sw, sh),
-            BlitRegion::full(Texture::SWAPCHAIN, sw, sh),
-        ));
+        // cmd.blit_texture(&BlitInfo::new(
+        //     BlitRegion::full(self.targets.resolve, sw, sh),
+        //     BlitRegion::full(Texture::SWAPCHAIN, sw, sh),
+        // ));
 
         cmd.submit();
         Ok(())
@@ -272,7 +272,7 @@ impl Renderer {
 }
 
 fn run_compute_fill(device: &Device) {
-    let pipeline = device.create_compute_pipeline(&ComputePipelineCreateInfo {
+    let mut pipeline = device.create_compute_pipeline(&ComputePipelineCreateInfo {
         code: include_bytes!("fill_array.comp.spv"),
         entrypoint: "main",
         format: SDL_GPUShaderFormat::SPIRV,
@@ -287,7 +287,7 @@ fn run_compute_fill(device: &Device) {
         threadcount_z: 1,
     }).expect("Failed to create compute pipeline");
 
-    let buffer = device.create_buffer(
+    let mut buffer = device.create_buffer(
         SDL_GPUBufferUsageFlags::COMPUTE_STORAGE_WRITE,
         256 * std::mem::size_of::<u32>() as u32,
     ).expect("Failed to create compute buffer");
@@ -319,8 +319,8 @@ fn run_compute_fill(device: &Device) {
         println!();
     }
 
-    device.destroy_buffer(buffer);
-    device.destroy_compute_pipeline(pipeline);
+    buffer.destroy(device);
+    pipeline.destroy(device);
 }
 
 struct DemoApp {

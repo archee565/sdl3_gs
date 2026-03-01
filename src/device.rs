@@ -4,7 +4,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use sdl3_sys as sys;
 use sys::*;
 
+pub use gpu::SDL_GPUTextureCreateInfo;
+pub use gpu::SDL_GPURasterizerState;
+pub use gpu::SDL_GPUMultisampleState;
 pub use gpu::SDL_GPUShaderFormat;
+pub use gpu::SDL_GPUDepthStencilState;
 pub use gpu::SDL_GPUShaderStage;
 pub use gpu::SDL_GPULoadOp;
 pub use gpu::SDL_GPUStoreOp;
@@ -385,12 +389,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_texture(&self, handle: Texture) {
-        let slot = self.textures.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUTexture(self.inner, slot.inner);
-        }
-    }
 
     pub(crate) fn texture_raw(&self, handle: Texture) -> *mut gpu::SDL_GPUTexture {
         if handle == Texture::SWAPCHAIN {
@@ -435,12 +433,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_shader(&self, handle: Shader) {
-        let slot = self.shaders.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUShader(self.inner, slot.inner);
-        }
-    }
 
     #[allow(deprecated)]
     pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, &'static str> {
@@ -493,12 +485,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_graphics_pipeline(&self, handle: GraphicsPipeline) {
-        let slot = self.graphics_pipelines.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUGraphicsPipeline(self.inner, slot.inner);
-        }
-    }
 
     pub fn create_compute_pipeline(&self, info: &ComputePipelineCreateInfo) -> Result<ComputePipeline, &'static str> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
@@ -529,12 +515,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_compute_pipeline(&self, handle: ComputePipeline) {
-        let slot = self.compute_pipelines.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUComputePipeline(self.inner, slot.inner);
-        }
-    }
 
     pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, &'static str> {
         let info = gpu::SDL_GPUBufferCreateInfo {
@@ -552,12 +532,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_buffer(&self, handle: GPUBuffer) {
-        let slot = self.buffers.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUBuffer(self.inner, slot.inner);
-        }
-    }
 
     pub(crate) fn buffer_raw(&self, handle: GPUBuffer) -> *mut gpu::SDL_GPUBuffer {
         self.buffers.with(handle.0, |slot| slot.inner)
@@ -574,12 +548,6 @@ impl Device {
         }
     }
 
-    pub fn destroy_sampler(&self, handle: Sampler) {
-        let slot = self.samplers.remove(handle.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUSampler(self.inner, slot.inner);
-        }
-    }
 
     pub(crate) fn sampler_raw(&self, handle: Sampler) -> *mut gpu::SDL_GPUSampler {
         self.samplers.with(handle.0, |slot| slot.inner)
@@ -821,25 +789,88 @@ struct SamplerSlot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Texture(pub i32);
 
+impl Texture {
+    /// Reserved handle for the current swapchain texture.
+    pub const SWAPCHAIN: Texture = Texture(-7777);
+
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.textures.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUTexture(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
+
 /// Handle to a shader stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Shader(pub i32);
+
+impl Shader {
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.shaders.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUShader(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
 
 /// Handle to a graphics pipeline stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GraphicsPipeline(pub i32);
 
+impl GraphicsPipeline {
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.graphics_pipelines.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUGraphicsPipeline(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
+
 /// Handle to a compute pipeline stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ComputePipeline(pub i32);
+
+impl ComputePipeline {
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.compute_pipelines.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUComputePipeline(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
 
 /// Handle to a GPU buffer stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GPUBuffer(pub i32);
 
+impl GPUBuffer {
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.buffers.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUBuffer(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
+
 /// Handle to a GPU sampler stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sampler(pub i32);
+
+impl Sampler {
+    pub fn destroy(&mut self, device: &Device) {
+        let slot = device.samplers.remove(self.0);
+        unsafe {
+            gpu::SDL_ReleaseGPUSampler(device.inner, slot.inner);
+        }
+        self.0 = -1;
+    }
+}
 
 /// A texture+sampler pair for binding to a shader slot.
 pub struct TextureSamplerBinding {
@@ -852,11 +883,6 @@ pub struct GPUBufferBinding {
     pub buffer: GPUBuffer,
     /// The starting byte offset within the buffer.
     pub offset: u32,
-}
-
-impl Texture {
-    /// Reserved handle for the current swapchain texture.
-    pub const SWAPCHAIN: Texture = Texture(-7777);
 }
 
 
@@ -872,13 +898,13 @@ pub struct GraphicsPipelineCreateInfo {
     /// The primitive topology of the graphics pipeline.
     pub primitive_type: SDL_GPUPrimitiveType,
     /// The rasterizer state of the graphics pipeline.
-    pub rasterizer_state: gpu::SDL_GPURasterizerState,
+    pub rasterizer_state: SDL_GPURasterizerState,
     /// The multisample state of the graphics pipeline.
-    pub multisample_state: gpu::SDL_GPUMultisampleState,
+    pub multisample_state: SDL_GPUMultisampleState,
     /// The depth-stencil state of the graphics pipeline.
-    pub depth_stencil_state: gpu::SDL_GPUDepthStencilState,
+    pub depth_stencil_state: SDL_GPUDepthStencilState,
     /// Color target descriptions.
-    pub color_target_descriptions: Vec<gpu::SDL_GPUColorTargetDescription>,
+    pub color_target_descriptions: Vec<SDL_GPUColorTargetDescription>,
     /// The pixel format of the depth-stencil target. Ignored if has_depth_stencil_target is false.
     pub depth_stencil_format: SDL_GPUTextureFormat,
     /// Whether the pipeline uses a depth-stencil target.
@@ -1086,7 +1112,7 @@ impl<'a> CommandBuffer<'a> {
 pub struct RenderPass<'b> {
     inner: *mut gpu::SDL_GPURenderPass,
     cmd_buf: *mut gpu::SDL_GPUCommandBuffer,
-    device: &'b Device,
+    pub device: &'b Device,
 }
 
 impl RenderPass<'_> {
@@ -1147,24 +1173,24 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn push_vertex_uniform_data<T: Copy>(&self, slot_index: u32, data: &T) {
+    pub fn push_vertex_uniform_data(&self, slot_index: u32, data: &[u8]) {
         unsafe {
             gpu::SDL_PushGPUVertexUniformData(
                 self.cmd_buf,
                 slot_index,
-                data as *const T as *const std::ffi::c_void,
-                std::mem::size_of_val(data) as u32,
+                data.as_ptr() as *const std::ffi::c_void,
+                data.len() as u32,
             );
         }
     }
 
-    pub fn push_fragment_uniform_data<T: Copy>(&self, slot_index: u32, data: &T) {
+    pub fn push_fragment_uniform_data(&self, slot_index: u32, data: &[u8]) {
         unsafe {
             gpu::SDL_PushGPUFragmentUniformData(
                 self.cmd_buf,
                 slot_index,
-                data as *const T as *const std::ffi::c_void,
-                std::mem::size_of_val(data) as u32,
+                data.as_ptr() as *const std::ffi::c_void,
+                data.len() as u32,
             );
         }
     }
@@ -1344,13 +1370,13 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn push_compute_uniform_data<T: Copy>(&self, slot_index: u32, data: &T) {
+    pub fn push_compute_uniform_data(&self, slot_index: u32, data: &[u8]) {
         unsafe {
             gpu::SDL_PushGPUComputeUniformData(
                 self.cmd_buf,
                 slot_index,
-                data as *const T as *const std::ffi::c_void,
-                std::mem::size_of_val(data) as u32,
+                data.as_ptr() as *const std::ffi::c_void,
+                data.len() as u32,
             );
         }
     }
