@@ -8,8 +8,14 @@ repository = "https://github.com/archee565/sdl3_gs.git"
 keywords = ["sdl3", "gpu", "graphics", "gamedev"]
 categories = ["game-development", "graphics", "rendering"]
 
+[features]
+build-from-source = ["sdl3-sys/build-from-source"]
+build-from-source-static = ["sdl3-sys/build-from-source-static"]
+link-static = ["sdl3-sys/link-static"]
+sdl-lean-and-mean = ["sdl3-sys/sdl-lean-and-mean"]
+
 [dependencies]
-sdl3-sys = { version = "0.6.1" }
+sdl3-sys = { version = "=0.6.0" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [lib]

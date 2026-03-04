@@ -44,6 +44,16 @@ pub use gpu::SDL_GPUViewport;
 
 use crate::slot_map::SlotMapRefCell;
 
+fn validate_sample_count(sample_count: gpu::SDL_GPUSampleCount) -> Result<(), &'static str> {
+    match sample_count {
+        gpu::SDL_GPUSampleCount::_1
+        | gpu::SDL_GPUSampleCount::_2
+        | gpu::SDL_GPUSampleCount::_4
+        | gpu::SDL_GPUSampleCount::_8 => Ok(()),
+        _ => Err("invalid sample count: must be 1, 2, 4, or 8"),
+    }
+}
+
 pub struct ColorTargetInfo {
     /// The texture that will be used as a color target by a render pass.
     pub texture: Texture,
@@ -178,7 +188,7 @@ pub struct TextureRegion {
 
 impl TextureRegion {
     pub fn full(texture: Texture, device: &Device) -> Self {
-        let (w, h) = device.texture_res(texture);
+        let (w, h) = device.get_texture_res(texture);
         Self {
             texture,
             mip_level: 0,
@@ -375,6 +385,7 @@ impl Device {
     }
 
     pub fn create_texture(&self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, &'static str> {
+        validate_sample_count(info.sample_count)?;
         unsafe {
             let raw = gpu::SDL_CreateGPUTexture(self.inner, info);
             if raw.is_null() {
@@ -399,7 +410,7 @@ impl Device {
         self.textures.with(handle.0, |slot| slot.inner)
     }
 
-    pub fn texture_res(&self, handle: Texture) -> (u32, u32) {
+    pub fn get_texture_res(&self, handle: Texture) -> (u32, u32) {
         if handle == Texture::SWAPCHAIN {
             let (ptr, w, h) = self.swapchain.get();
             assert!(!ptr.is_null(), "no swapchain texture acquired");
@@ -436,6 +447,7 @@ impl Device {
 
     #[allow(deprecated)]
     pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, &'static str> {
+        validate_sample_count(info.multisample_state.sample_count)?;
         let vertex_shader_raw = self.shaders.with(info.vertex_shader.0, |s| s.inner);
         let fragment_shader_raw = self.shaders.with(info.fragment_shader.0, |s| s.inner);
         let raw_info = gpu::SDL_GPUGraphicsPipelineCreateInfo {
@@ -535,6 +547,10 @@ impl Device {
 
     pub(crate) fn buffer_raw(&self, handle: GPUBuffer) -> *mut gpu::SDL_GPUBuffer {
         self.buffers.with(handle.0, |slot| slot.inner)
+    }
+
+    pub fn get_buffer_size(&self, handle: GPUBuffer) -> u32 {
+        self.buffers.with(handle.0, |slot| slot.size)
     }
 
     pub fn create_sampler(&self, info: &gpu::SDL_GPUSamplerCreateInfo) -> Result<Sampler, &'static str> {
@@ -653,6 +669,42 @@ impl Device {
         })
     }
 
+    /// Update a GPU buffer with new data, (re)creating it if invalid or too small.
+    pub fn update_buffer(
+        &self,
+        buffer: &mut GPUBuffer,
+        copy_pass: Option<&CopyPass>,
+        usage: SDL_GPUBufferUsageFlags,
+        data: &[u8],
+    ) -> Result<(), &'static str> {
+        let size = data.len() as u32;
+        let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
+        if needs_recreate {
+            if buffer.is_valid() {
+                buffer.destroy(self);
+            }
+            *buffer = self.create_buffer(usage, size)?;
+        }
+        self.upload_to_buffer(copy_pass, *buffer, 0, data)
+    }
+
+    /// Ensure a buffer exists and is at least `size` bytes, (re)creating it if needed.
+    pub fn ensure_buffer_size(
+        &self,
+        buffer: &mut GPUBuffer,
+        usage: SDL_GPUBufferUsageFlags,
+        size: u32,
+    ) -> Result<(), &'static str> {
+        let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
+        if needs_recreate {
+            if buffer.is_valid() {
+                buffer.destroy(self);
+            }
+            *buffer = self.create_buffer(usage, size)?;
+        }
+        Ok(())
+    }
+
     /// Upload pixel data from a byte slice into a GPU texture region.
     pub fn upload_to_texture(
         &self,
@@ -741,7 +793,7 @@ impl Device {
                 return Err("SDL_AcquireGPUCommandBuffer failed");
             }
             self.cmd_buf_count.fetch_add(1, Ordering::Relaxed);
-            Ok(CommandBuffer { inner: raw, device: self, submitted: false })
+            Ok(CommandBuffer { inner: raw, device: self, submitted: false, pass_active: Cell::new(false) })
         }
     }
 
@@ -789,9 +841,17 @@ struct SamplerSlot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Texture(pub i32);
 
+impl Default for Texture
+{
+    fn default() -> Self {
+        Texture::NONE
+    }
+}
+
 impl Texture {
     /// Reserved handle for the current swapchain texture.
     pub const SWAPCHAIN: Texture = Texture(-7777);
+    pub const NONE: Texture = Texture(-1);
 
     pub fn destroy(&mut self, device: &Device) {
         let slot = device.textures.remove(self.0);
@@ -799,6 +859,11 @@ impl Texture {
             gpu::SDL_ReleaseGPUTexture(device.inner, slot.inner);
         }
         self.0 = -1;
+    }
+
+    pub fn is_valid(&self) -> bool
+    {
+        self.0 !=-1
     }
 }
 
@@ -856,6 +921,19 @@ impl GPUBuffer {
         }
         self.0 = -1;
     }
+    pub fn is_valid(&self) -> bool 
+    {
+        self.0 != -1
+    }
+}
+
+impl Default for GPUBuffer {
+    fn default() -> Self {
+        Self
+        {
+            0: -1
+        }
+    }    
 }
 
 /// Handle to a GPU sampler stored in a `Device`.
@@ -956,6 +1034,7 @@ pub struct CommandBuffer<'a> {
     inner: *mut gpu::SDL_GPUCommandBuffer,
     device: &'a Device,
     submitted: bool,
+    pass_active: Cell<bool>,
 }
 
 impl<'a> CommandBuffer<'a> {
@@ -1026,20 +1105,23 @@ impl<'a> CommandBuffer<'a> {
 }
 
 impl<'a> CommandBuffer<'a> {
-    pub fn begin_copy_pass<'b>(&'b mut self) -> Result<CopyPass<'b>, &'static str> {
+    pub fn begin_copy_pass<'b>(&'b self) -> Result<CopyPass<'b>, &'static str> {
+        assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         unsafe {
             let raw = gpu::SDL_BeginGPUCopyPass(self.inner);
             if raw.is_null() {
                 return Err("SDL_BeginGPUCopyPass failed");
             }
-            Ok(CopyPass { inner: raw, device: self.device, _marker: std::marker::PhantomData })
+            self.pass_active.set(true);
+            Ok(CopyPass { inner: raw, device: self.device, pass_active: &self.pass_active })
         }
     }
     pub fn begin_render_pass<'b>(
-        &'b mut self,
+        &'b self,
         color_targets: &[ColorTargetInfo],
         depth_stencil_target: Option<&DepthStencilTargetInfo>,
     ) -> Result<RenderPass<'b>, &'static str> {
+        assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         let raw_targets: Vec<gpu::SDL_GPUColorTargetInfo> = color_targets
             .iter()
             .map(|ct| ct.to_raw(self.device))
@@ -1061,16 +1143,18 @@ impl<'a> CommandBuffer<'a> {
             if raw.is_null() {
                 return Err("SDL_BeginGPURenderPass failed");
             }
-            Ok(RenderPass { inner: raw, cmd_buf: self.inner, device: self.device })
+            self.pass_active.set(true);
+            Ok(RenderPass { inner: raw, cmd_buf: self.inner, device: self.device, pass_active: &self.pass_active })
         }
     }
 
     #[allow(deprecated)]
     pub fn begin_compute_pass<'b>(
-        &'b mut self,
+        &'b self,
         storage_texture_bindings: &[StorageTextureReadWriteBinding],
         storage_buffer_bindings: &[StorageBufferReadWriteBinding],
     ) -> Result<ComputePass<'b>, &'static str> {
+        assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         let raw_tex_bindings: Vec<gpu::SDL_GPUStorageTextureReadWriteBinding> = storage_texture_bindings
             .iter()
             .map(|b| gpu::SDL_GPUStorageTextureReadWriteBinding {
@@ -1104,7 +1188,8 @@ impl<'a> CommandBuffer<'a> {
             if raw.is_null() {
                 return Err("SDL_BeginGPUComputePass failed");
             }
-            Ok(ComputePass { inner: raw, cmd_buf: self.inner, device: self.device })
+            self.pass_active.set(true);
+            Ok(ComputePass { inner: raw, cmd_buf: self.inner, device: self.device, pass_active: &self.pass_active })
         }
     }
 }
@@ -1113,6 +1198,7 @@ pub struct RenderPass<'b> {
     inner: *mut gpu::SDL_GPURenderPass,
     cmd_buf: *mut gpu::SDL_GPUCommandBuffer,
     pub device: &'b Device,
+    pass_active: &'b Cell<bool>,
 }
 
 impl RenderPass<'_> {
@@ -1152,6 +1238,18 @@ impl RenderPass<'_> {
     pub fn draw_indexed_primitives(&self, num_indices: u32, num_instances: u32, first_index: u32, vertex_offset: i32, first_instance: u32) {
         unsafe {
             gpu::SDL_DrawGPUIndexedPrimitives(self.inner, num_indices, num_instances, first_index, vertex_offset, first_instance);
+        }
+    }
+
+    pub fn draw_primitives_indirect(&self, buffer: GPUBuffer, offset: u32, draw_count: u32) {
+        unsafe {
+            gpu::SDL_DrawGPUPrimitivesIndirect(self.inner, self.device.buffer_raw(buffer), offset, draw_count);
+        }
+    }
+
+    pub fn draw_indexed_primitives_indirect(&self, buffer: GPUBuffer, offset: u32, draw_count: u32) {
+        unsafe {
+            gpu::SDL_DrawGPUIndexedPrimitivesIndirect(self.inner, self.device.buffer_raw(buffer), offset, draw_count);
         }
     }
 
@@ -1196,6 +1294,7 @@ impl RenderPass<'_> {
     }
 
     pub fn bind_index_buffer(&self, binding: &GPUBufferBinding, index_element_size: SDL_GPUIndexElementSize) {
+        assert!(binding.buffer.0 != -1);
         let raw = gpu::SDL_GPUBufferBinding {
             buffer: self.device.buffer_raw(binding.buffer),
             offset: binding.offset,
@@ -1258,6 +1357,21 @@ impl RenderPass<'_> {
             );
         }
     }
+
+    pub fn bind_vertex_storage_buffers(&self, first_slot: u32, buffers: &[GPUBuffer]) {
+        let raw: Vec<*mut gpu::SDL_GPUBuffer> = buffers
+            .iter()
+            .map(|b| self.device.buffer_raw(*b))
+            .collect();
+        unsafe {
+            gpu::SDL_BindGPUVertexStorageBuffers(
+                self.inner,
+                first_slot,
+                raw.as_ptr(),
+                raw.len() as u32,
+            );
+        }
+    }
 }
 
 impl Drop for RenderPass<'_> {
@@ -1265,13 +1379,14 @@ impl Drop for RenderPass<'_> {
         unsafe {
             gpu::SDL_EndGPURenderPass(self.inner);
         }
+        self.pass_active.set(false);
     }
 }
 
 pub struct CopyPass<'b> {
     pub(crate) inner: *mut gpu::SDL_GPUCopyPass,
     device: &'b Device,
-    _marker: std::marker::PhantomData<&'b mut CommandBuffer<'b>>,
+    pass_active: &'b Cell<bool>,
 }
 
 impl CopyPass<'_> {
@@ -1303,6 +1418,7 @@ impl Drop for CopyPass<'_> {
         unsafe {
             gpu::SDL_EndGPUCopyPass(self.inner);
         }
+        self.pass_active.set(false);
     }
 }
 
@@ -1310,6 +1426,7 @@ pub struct ComputePass<'b> {
     inner: *mut gpu::SDL_GPUComputePass,
     cmd_buf: *mut gpu::SDL_GPUCommandBuffer,
     device: &'b Device,
+    pass_active: &'b Cell<bool>,
 }
 
 impl ComputePass<'_> {
@@ -1399,6 +1516,7 @@ impl Drop for ComputePass<'_> {
         unsafe {
             gpu::SDL_EndGPUComputePass(self.inner);
         }
+        self.pass_active.set(false);
     }
 }
 

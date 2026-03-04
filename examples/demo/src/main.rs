@@ -233,7 +233,7 @@ impl Renderer {
             return Ok(());
         };
 
-        let (sw, sh) = cmd.device().texture_res(Texture::SWAPCHAIN);
+        let (sw, sh) = cmd.device().get_texture_res(Texture::SWAPCHAIN);
 
         if self.targets.width != sw || self.targets.height != sh {
             self.targets.destroy(device);

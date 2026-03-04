@@ -86,6 +86,7 @@ pub unsafe fn enter_main_callbacks<T: App>(
     argv: *mut *mut core::ffi::c_char,
 ) -> core::ffi::c_int {
     unsafe {
+        sys::main::SDL_SetMainReady();
         sys::main::SDL_EnterAppMainCallbacks(
             argc,
             argv,
