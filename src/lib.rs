@@ -5,6 +5,7 @@ pub mod slot_map;
 pub mod window;
 pub mod tools;
 pub mod callbacks;
+pub mod properties;
 
 pub use sdl3_sys as sys;
 

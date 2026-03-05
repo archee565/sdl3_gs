@@ -786,6 +786,23 @@ impl Device {
         unsafe { gpu::SDL_GetGPUShaderFormats(self.inner) }
     }
 
+    pub fn get_driver_name(&self) -> String
+    {
+        unsafe
+        {
+            std::ffi::CStr::from_ptr(sys::gpu::SDL_GetGPUDeviceDriver(self.inner)).to_string_lossy().to_string()
+        }
+    }
+
+    /// Get the device properties for this device
+    pub fn get_device_properties(&self) -> sys::properties::SDL_PropertiesID {
+        unsafe
+        {
+            sys::gpu::SDL_GetGPUDeviceProperties(self.inner)
+        }
+    }
+
+
     pub fn acquire_command_buffer(&self) -> Result<CommandBuffer<'_>, &'static str> {
         unsafe {
             let raw = gpu::SDL_AcquireGPUCommandBuffer(self.inner);
