@@ -13,6 +13,7 @@ build-from-source = ["sdl3-sys/build-from-source"]
 build-from-source-static = ["sdl3-sys/build-from-source-static"]
 link-static = ["sdl3-sys/link-static"]
 sdl-lean-and-mean = ["sdl3-sys/sdl-lean-and-mean"]
+link-framework = ["sdl3-sys/link-framework"]
 
 [dependencies]
 sdl3-sys = { version = "=0.6.0" }
