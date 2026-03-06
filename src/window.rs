@@ -7,6 +7,11 @@ pub struct Window
 }
 
 impl  Window {
+    pub fn set_fullscreen(&self, fullscreen : bool)
+    {
+        unsafe { sys::video::SDL_SetWindowFullscreen(self.inner, fullscreen); }
+    }
+
     pub fn create(
             title: &str,
             res: (u32, u32),
@@ -47,6 +52,22 @@ impl  Window {
         }
     }
     
+    pub fn set_position(&self, x: i32, y: i32) -> Result<(), &'static str> {
+        let ok = unsafe { video::SDL_SetWindowPosition(self.inner, x, y) };
+        if ok { Ok(()) } else { Err("SDL_SetWindowPosition failed") }
+    }
+
+    pub fn get_position(&self) -> Result<(i32, i32), &'static str> {
+        let mut x: i32 = 0;
+        let mut y: i32 = 0;
+        let ok = unsafe { video::SDL_GetWindowPosition(self.inner, &mut x, &mut y) };
+        if ok { Ok((x, y)) } else { Err("SDL_GetWindowPosition failed") }
+    }
+
+    pub fn center(&self) -> Result<(), &'static str> {
+        self.set_position(video::SDL_WINDOWPOS_CENTERED, video::SDL_WINDOWPOS_CENTERED)
+    }
+
     pub(crate) fn raw(&self) -> *mut video::SDL_Window {
         self.inner
     }

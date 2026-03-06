@@ -347,6 +347,11 @@ pub struct Device
 }
 
 impl Device {
+    pub fn get_window(&self) -> Option<&crate::window::Window>
+    {
+        self.window.as_ref()
+    }
+
     pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>) -> Result<Self,&'static str>
     {
         unsafe {
@@ -957,7 +962,17 @@ impl Default for GPUBuffer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sampler(pub i32);
 
+impl Default for Sampler {
+    fn default() -> Self {
+        Sampler(-1)
+    }
+}
+
 impl Sampler {
+    pub fn is_valid(&self) -> bool {
+        self.0 != -1
+    }
+
     pub fn destroy(&mut self, device: &Device) {
         let slot = device.samplers.remove(self.0);
         unsafe {
