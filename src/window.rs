@@ -1,6 +1,15 @@
 use sdl3_sys as sys;
 use sys::*;
 
+/// Safe wrapper around `SDL_DisplayMode`.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayMode {
+    pub w: i32,
+    pub h: i32,
+    pub refresh_rate: f32,
+    pub pixel_density: f32,
+}
+
 pub struct Window
 {
     inner : *mut sys::video::SDL_Window,
@@ -66,6 +75,26 @@ impl  Window {
 
     pub fn center(&self) -> Result<(), &'static str> {
         self.set_position(video::SDL_WINDOWPOS_CENTERED, video::SDL_WINDOWPOS_CENTERED)
+    }
+
+    pub fn get_current_display_mode(&self) -> Result<DisplayMode, &'static str> {
+        unsafe {
+            let display_id = video::SDL_GetDisplayForWindow(self.inner);
+            if display_id == video::SDL_DisplayID(0) {
+                return Err("SDL_GetDisplayForWindow failed");
+            }
+            let mode = video::SDL_GetCurrentDisplayMode(display_id);
+            if mode.is_null() {
+                return Err("SDL_GetCurrentDisplayMode failed");
+            }
+            let m = &*mode;
+            Ok(DisplayMode {
+                w: m.w,
+                h: m.h,
+                refresh_rate: m.refresh_rate,
+                pixel_density: m.pixel_density,
+            })
+        }
     }
 
     pub(crate) fn raw(&self) -> *mut video::SDL_Window {
