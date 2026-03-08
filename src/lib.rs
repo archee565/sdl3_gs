@@ -15,7 +15,15 @@ pub use sdl3_sys::video::*;
 pub fn sdl_init(flags : SDL_InitFlags)
 {
     unsafe
-    {        
+    {
         SDL_Init(flags);
+    }
+}
+
+pub fn set_hint(name: *const core::ffi::c_char, value: &core::ffi::CStr) -> bool
+{
+    unsafe
+    {
+        sdl3_sys::hints::SDL_SetHint(name, value.as_ptr())
     }
 }
