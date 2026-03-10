@@ -831,6 +831,17 @@ impl Device {
             }
         }
     }
+
+    pub fn wait_for_swapchain(&self) -> Result<(), &'static str> {
+        let window = self.window.as_ref()
+            .ok_or("Device has no window")?;
+        unsafe {
+            if !gpu::SDL_WaitForGPUSwapchain(self.inner, window.raw()) {
+                return Err("SDL_WaitForGPUSwapchain failed");
+            }
+        }
+        Ok(())
+    }
 }
 
 struct TextureSlot {
@@ -1109,6 +1120,33 @@ impl<'a> CommandBuffer<'a> {
         } else {
             Ok(Some(Texture::SWAPCHAIN))
         }
+    }
+
+    pub fn wait_and_acquire_swapchain_texture(
+        &self,
+    ) -> Result<Texture, &'static str> {
+        let window = self.device.window.as_ref()
+            .ok_or("Device has no window")?;
+
+        let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
+        let mut width: u32 = 0;
+        let mut height: u32 = 0;
+
+        unsafe {
+            let ok = gpu::SDL_WaitAndAcquireGPUSwapchainTexture(
+                self.inner,
+                window.raw(),
+                &mut texture,
+                &mut width,
+                &mut height,
+            );
+            if !ok {
+                return Err("SDL_WaitAndAcquireGPUSwapchainTexture failed");
+            }
+        }
+
+        self.device.swapchain.set((texture, width, height));
+        Ok(Texture::SWAPCHAIN)
     }
 
     pub fn submit(mut self) -> Result<(), &'static str> {
