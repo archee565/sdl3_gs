@@ -389,6 +389,22 @@ impl Device {
         
     }
 
+    /// Release the window from the GPU device. Must be called on Android
+    /// when the app enters the background (`SDL_EVENT_DID_ENTER_BACKGROUND`).
+    pub fn release_window(&self) {
+        if let Some(window) = &self.window {
+            unsafe { gpu::SDL_ReleaseWindowFromGPUDevice(self.inner, window.raw()); }
+        }
+    }
+
+    /// Claim the window for the GPU device. Must be called on Android
+    /// when the app enters the foreground (`SDL_EVENT_WILL_ENTER_FOREGROUND`).
+    pub fn claim_window(&self) {
+        if let Some(window) = &self.window {
+            unsafe { gpu::SDL_ClaimWindowForGPUDevice(self.inner, window.raw()); }
+        }
+    }
+
     pub fn create_texture(&self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, &'static str> {
         validate_sample_count(info.sample_count)?;
         unsafe {
