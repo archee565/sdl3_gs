@@ -35,6 +35,7 @@ pub use gpu::SDL_GPUIndexElementSize;
 pub use gpu::SDL_GPUFilter;
 pub use gpu::SDL_GPUSamplerAddressMode;
 pub use gpu::SDL_GPUSamplerMipmapMode;
+pub use gpu::SDL_GPUSamplerCreateInfo;
 pub use gpu::SDL_GPUTextureUsageFlags;
 pub use gpu::SDL_GPUTextureType;
 pub use sys::pixels::SDL_FColor;
@@ -44,13 +45,21 @@ pub use gpu::SDL_GPUViewport;
 
 use crate::slot_map::SlotMapRefCell;
 
-fn validate_sample_count(sample_count: gpu::SDL_GPUSampleCount) -> Result<(), &'static str> {
+fn sdl_err() -> String {
+    unsafe { std::ffi::CStr::from_ptr(sys::error::SDL_GetError()).to_string_lossy().into_owned() }
+}
+
+fn sdl_fail(context: &str) -> String {
+    format!("{}: {}", context, sdl_err())
+}
+
+fn validate_sample_count(sample_count: gpu::SDL_GPUSampleCount) -> Result<(), String> {
     match sample_count {
         gpu::SDL_GPUSampleCount::_1
         | gpu::SDL_GPUSampleCount::_2
         | gpu::SDL_GPUSampleCount::_4
         | gpu::SDL_GPUSampleCount::_8 => Ok(()),
-        _ => Err("invalid sample count: must be 1, 2, 4, or 8"),
+        _ => Err("invalid sample count: must be 1, 2, 4, or 8".into()),
     }
 }
 
@@ -352,7 +361,7 @@ impl Device {
         self.window.as_ref()
     }
 
-    pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>) -> Result<Self,&'static str>
+    pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>) -> Result<Self,String>
     {
         unsafe {
             let sys_device = gpu::SDL_CreateGPUDevice(
@@ -363,7 +372,7 @@ impl Device {
 
             if sys_device.is_null()
             {
-                return Err("SDL CreateGPUDevice failed.");
+                return Err(sdl_fail("SDL_CreateGPUDevice"));
             }
 
             if let Some(window) = &window
@@ -405,12 +414,12 @@ impl Device {
         }
     }
 
-    pub fn create_texture(&self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, &'static str> {
+    pub fn create_texture(&self, info: &gpu::SDL_GPUTextureCreateInfo) -> Result<Texture, String> {
         validate_sample_count(info.sample_count)?;
         unsafe {
             let raw = gpu::SDL_CreateGPUTexture(self.inner, info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUTexture failed");
+                return Err(sdl_fail("SDL_CreateGPUTexture"));
             }
             let slot = TextureSlot {
                 inner: raw,
@@ -440,9 +449,9 @@ impl Device {
         self.textures.with(handle.0, |slot| slot.res)
     }
 
-    pub fn create_shader(&self, info: &ShaderCreateInfo) -> Result<Shader, &'static str> {
+    pub fn create_shader(&self, info: &ShaderCreateInfo) -> Result<Shader, String> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
-            .map_err(|_| "entrypoint contains interior nul byte")?;
+            .map_err(|_| String::from("entrypoint contains interior nul byte"))?;
         let raw_info = gpu::SDL_GPUShaderCreateInfo {
             code_size: info.code.len(),
             code: info.code.as_ptr(),
@@ -458,7 +467,7 @@ impl Device {
         unsafe {
             let raw = gpu::SDL_CreateGPUShader(self.inner, &raw_info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUShader failed");
+                return Err(sdl_fail("SDL_CreateGPUShader"));
             }
             let idx = self.shaders.insert(ShaderSlot { inner: raw });
             Ok(Shader(idx))
@@ -467,7 +476,7 @@ impl Device {
 
 
     #[allow(deprecated)]
-    pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, &'static str> {
+    pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, String> {
         validate_sample_count(info.multisample_state.sample_count)?;
         let vertex_shader_raw = self.shaders.with(info.vertex_shader.0, |s| s.inner);
         let fragment_shader_raw = self.shaders.with(info.fragment_shader.0, |s| s.inner);
@@ -511,7 +520,7 @@ impl Device {
         unsafe {
             let raw = gpu::SDL_CreateGPUGraphicsPipeline(self.inner, &raw_info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUGraphicsPipeline failed");
+                return Err(sdl_fail("SDL_CreateGPUGraphicsPipeline"));
             }
             let idx = self.graphics_pipelines.insert(GraphicsPipelineSlot { inner: raw });
             Ok(GraphicsPipeline(idx))
@@ -519,9 +528,9 @@ impl Device {
     }
 
 
-    pub fn create_compute_pipeline(&self, info: &ComputePipelineCreateInfo) -> Result<ComputePipeline, &'static str> {
+    pub fn create_compute_pipeline(&self, info: &ComputePipelineCreateInfo) -> Result<ComputePipeline, String> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
-            .map_err(|_| "entrypoint contains interior nul byte")?;
+            .map_err(|_| String::from("entrypoint contains interior nul byte"))?;
         let raw_info = gpu::SDL_GPUComputePipelineCreateInfo {
             code_size: info.code.len(),
             code: info.code.as_ptr(),
@@ -539,9 +548,10 @@ impl Device {
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
+            
             let raw = gpu::SDL_CreateGPUComputePipeline(self.inner, &raw_info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUComputePipeline failed");
+                return Err(sdl_fail("SDL_CreateGPUComputePipeline"));
             }
             let idx = self.compute_pipelines.insert(ComputePipelineSlot { inner: raw });
             Ok(ComputePipeline(idx))
@@ -549,7 +559,7 @@ impl Device {
     }
 
 
-    pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, &'static str> {
+    pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, String> {
         let info = gpu::SDL_GPUBufferCreateInfo {
             usage,
             size,
@@ -558,7 +568,7 @@ impl Device {
         unsafe {
             let raw = gpu::SDL_CreateGPUBuffer(self.inner, &info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUBuffer failed");
+                return Err(sdl_fail("SDL_CreateGPUBuffer"));
             }
             let idx = self.buffers.insert(BufferSlot { inner: raw, size });
             Ok(GPUBuffer(idx))
@@ -574,11 +584,11 @@ impl Device {
         self.buffers.with(handle.0, |slot| slot.size)
     }
 
-    pub fn create_sampler(&self, info: &gpu::SDL_GPUSamplerCreateInfo) -> Result<Sampler, &'static str> {
+    pub fn create_sampler(&self, info: &gpu::SDL_GPUSamplerCreateInfo) -> Result<Sampler, String> {
         unsafe {
             let raw = gpu::SDL_CreateGPUSampler(self.inner, info);
             if raw.is_null() {
-                return Err("SDL_CreateGPUSampler failed");
+                return Err(sdl_fail("SDL_CreateGPUSampler"));
             }
             let idx = self.samplers.insert(SamplerSlot { inner: raw });
             Ok(Sampler(idx))
@@ -592,7 +602,7 @@ impl Device {
 
     /// Ensure the internal upload transfer buffer is at least `size` bytes.
     /// Grows by releasing the old one and creating a new one if needed.
-    fn ensure_upload_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, &'static str> {
+    fn ensure_upload_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
         let (current, current_size) = self.upload_transfer_buffer.get();
         if !current.is_null() && current_size >= size {
             return Ok(current);
@@ -610,7 +620,7 @@ impl Device {
             let raw = gpu::SDL_CreateGPUTransferBuffer(self.inner, &tb_info);
             if raw.is_null() {
                 self.upload_transfer_buffer.set((std::ptr::null_mut(), 0));
-                return Err("SDL_CreateGPUTransferBuffer failed");
+                return Err(sdl_fail("SDL_CreateGPUTransferBuffer"));
             }
             self.upload_transfer_buffer.set((raw, size));
             Ok(raw)
@@ -619,7 +629,7 @@ impl Device {
 
     /// Stage upload data into the internal transfer buffer (map, copy, unmap).
     /// Returns the transfer buffer handle.
-    fn stage_upload(&self, data: &[u8]) -> Result<*mut gpu::SDL_GPUTransferBuffer, &'static str> {
+    fn stage_upload(&self, data: &[u8]) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
         let transfer = self.ensure_upload_transfer_buffer(data.len() as u32)?;
         unsafe {
             let ptr = gpu::SDL_MapGPUTransferBuffer(self.inner, transfer, true);
@@ -635,7 +645,7 @@ impl Device {
         &self,
         copy_pass: Option<&CopyPass>,
         f: impl FnOnce(*mut gpu::SDL_GPUCopyPass),
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         if let Some(pass) = copy_pass {
             f(pass.inner);
             return Ok(());
@@ -643,24 +653,24 @@ impl Device {
         unsafe {
             let cmd = gpu::SDL_AcquireGPUCommandBuffer(self.inner);
             if cmd.is_null() {
-                return Err("SDL_AcquireGPUCommandBuffer failed");
+                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
             }
             let tmp_pass = gpu::SDL_BeginGPUCopyPass(cmd);
             if tmp_pass.is_null() {
                 gpu::SDL_CancelGPUCommandBuffer(cmd);
-                return Err("SDL_BeginGPUCopyPass failed");
+                return Err(sdl_fail("SDL_BeginGPUCopyPass"));
             }
             f(tmp_pass);
             gpu::SDL_EndGPUCopyPass(tmp_pass);
             if !gpu::SDL_SubmitGPUCommandBuffer(cmd) {
-                return Err("SDL_SubmitGPUCommandBuffer failed");
+                return Err(sdl_fail("SDL_SubmitGPUCommandBuffer"));
             }
         }
         Ok(())
     }
 
     /// Create a download transfer buffer of the given size.
-    fn create_download_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, &'static str> {
+    fn create_download_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
         let tb_info = gpu::SDL_GPUTransferBufferCreateInfo {
             usage: gpu::SDL_GPUTransferBufferUsage::DOWNLOAD,
             size,
@@ -669,18 +679,18 @@ impl Device {
         unsafe {
             let transfer = gpu::SDL_CreateGPUTransferBuffer(self.inner, &tb_info);
             if transfer.is_null() {
-                return Err("SDL_CreateGPUTransferBuffer (download) failed");
+                return Err(sdl_fail("SDL_CreateGPUTransferBuffer (download)"));
             }
             Ok(transfer)
         }
     }
 
     /// Upload data from a byte slice into a GPU buffer.
-    pub fn upload_to_buffer(&self, copy_pass: Option<&CopyPass>, buffer: GPUBuffer, offset: u32, data: &[u8]) -> Result<(), &'static str> {
+    pub fn upload_to_buffer(&self, copy_pass: Option<&CopyPass>, buffer: GPUBuffer, offset: u32, data: &[u8]) -> Result<(), String> {
         let size = data.len() as u32;
         let buf_size = self.buffers.with(buffer.0, |slot| slot.size);
         if offset.saturating_add(size) > buf_size {
-            return Err("data exceeds buffer size");
+            return Err("data exceeds buffer size".into());
         }
         let transfer = self.stage_upload(data)?;
         let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
@@ -697,7 +707,7 @@ impl Device {
         copy_pass: Option<&CopyPass>,
         usage: SDL_GPUBufferUsageFlags,
         data: &[u8],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         let size = data.len() as u32;
         let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
         if needs_recreate {
@@ -715,7 +725,7 @@ impl Device {
         buffer: &mut GPUBuffer,
         usage: SDL_GPUBufferUsageFlags,
         size: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
         if needs_recreate {
             if buffer.is_valid() {
@@ -732,7 +742,7 @@ impl Device {
         copy_pass: Option<&CopyPass>,
         region: &TextureRegion,
         data: &[u8],
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), String> {
         let transfer = self.stage_upload(data)?;
         let src = gpu::SDL_GPUTextureTransferInfo {
             transfer_buffer: transfer,
@@ -747,24 +757,24 @@ impl Device {
     }
 
     /// Download data from a GPU buffer into a Vec<u8>.
-    pub fn download_from_buffer(&self, buffer: GPUBuffer, offset: u32, size: u32) -> Result<Vec<u8>, &'static str> {
+    pub fn download_from_buffer(&self, buffer: GPUBuffer, offset: u32, size: u32) -> Result<Vec<u8>, String> {
         let buf_size = self.buffers.with(buffer.0, |slot| slot.size);
         let size = if size == 0 { buf_size - offset } else { size };
         if offset.saturating_add(size) > buf_size {
-            return Err("requested range exceeds buffer size");
+            return Err("requested range exceeds buffer size".into());
         }
         let transfer = self.create_download_transfer_buffer(size)?;
         unsafe {
             let cmd = gpu::SDL_AcquireGPUCommandBuffer(self.inner);
             if cmd.is_null() {
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, transfer);
-                return Err("SDL_AcquireGPUCommandBuffer failed");
+                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
             }
             let pass = gpu::SDL_BeginGPUCopyPass(cmd);
             if pass.is_null() {
                 gpu::SDL_CancelGPUCommandBuffer(cmd);
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, transfer);
-                return Err("SDL_BeginGPUCopyPass failed");
+                return Err(sdl_fail("SDL_BeginGPUCopyPass"));
             }
 
             let src = gpu::SDL_GPUBufferRegion { buffer: self.buffer_raw(buffer), offset, size };
@@ -775,19 +785,19 @@ impl Device {
             let fence = gpu::SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
             if fence.is_null() {
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, transfer);
-                return Err("SDL_SubmitGPUCommandBufferAndAcquireFence failed");
+                return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
             }
             if !gpu::SDL_WaitForGPUFences(self.inner, true, &fence, 1) {
                 gpu::SDL_ReleaseGPUFence(self.inner, fence);
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, transfer);
-                return Err("SDL_WaitForGPUFences failed");
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
             }
             gpu::SDL_ReleaseGPUFence(self.inner, fence);
 
             let ptr = gpu::SDL_MapGPUTransferBuffer(self.inner, transfer, false);
             if ptr.is_null() {
                 gpu::SDL_ReleaseGPUTransferBuffer(self.inner, transfer);
-                return Err("SDL_MapGPUTransferBuffer failed");
+                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
             }
             let mut data = vec![0u8; size as usize];
             std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size as usize);
@@ -824,11 +834,11 @@ impl Device {
     }
 
 
-    pub fn acquire_command_buffer(&self) -> Result<CommandBuffer<'_>, &'static str> {
+    pub fn acquire_command_buffer(&self) -> Result<CommandBuffer<'_>, String> {
         unsafe {
             let raw = gpu::SDL_AcquireGPUCommandBuffer(self.inner);
             if raw.is_null() {
-                return Err("SDL_AcquireGPUCommandBuffer failed");
+                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
             }
             self.cmd_buf_count.fetch_add(1, Ordering::Relaxed);
             Ok(CommandBuffer { inner: raw, device: self, submitted: false, pass_active: Cell::new(false) })
@@ -848,12 +858,12 @@ impl Device {
         }
     }
 
-    pub fn wait_for_swapchain(&self) -> Result<(), &'static str> {
+    pub fn wait_for_swapchain(&self) -> Result<(), String> {
         let window = self.window.as_ref()
-            .ok_or("Device has no window")?;
+            .ok_or_else(|| String::from("Device has no window"))?;
         unsafe {
             if !gpu::SDL_WaitForGPUSwapchain(self.inner, window.raw()) {
-                return Err("SDL_WaitForGPUSwapchain failed");
+                return Err(sdl_fail("SDL_WaitForGPUSwapchain"));
             }
         }
         Ok(())
@@ -1107,9 +1117,9 @@ impl<'a> CommandBuffer<'a> {
 
     pub fn acquire_swapchain_texture(
         &self,
-    ) -> Result<Option<Texture>, &'static str> {
+    ) -> Result<Option<Texture>, String> {
         let window = self.device.window.as_ref()
-            .ok_or("Device has no window")?;
+            .ok_or_else(|| String::from("Device has no window"))?;
 
         let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
         let mut width: u32 = 0;
@@ -1126,7 +1136,7 @@ impl<'a> CommandBuffer<'a> {
                 &mut height,
             );
             if !ok {
-                return Err("SDL_AcquireGPUSwapchainTexture failed");
+                return Err(sdl_fail("SDL_AcquireGPUSwapchainTexture"));
             }
         }
 
@@ -1140,9 +1150,9 @@ impl<'a> CommandBuffer<'a> {
 
     pub fn wait_and_acquire_swapchain_texture(
         &self,
-    ) -> Result<Texture, &'static str> {
+    ) -> Result<Texture, String> {
         let window = self.device.window.as_ref()
-            .ok_or("Device has no window")?;
+            .ok_or_else(|| String::from("Device has no window"))?;
 
         let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
         let mut width: u32 = 0;
@@ -1157,7 +1167,7 @@ impl<'a> CommandBuffer<'a> {
                 &mut height,
             );
             if !ok {
-                return Err("SDL_WaitAndAcquireGPUSwapchainTexture failed");
+                return Err(sdl_fail("SDL_WaitAndAcquireGPUSwapchainTexture"));
             }
         }
 
@@ -1165,14 +1175,14 @@ impl<'a> CommandBuffer<'a> {
         Ok(Texture::SWAPCHAIN)
     }
 
-    pub fn submit(mut self) -> Result<(), &'static str> {
+    pub fn submit(mut self) -> Result<(), String> {
         // Mark submitted before the call — SDL consumes the command buffer
         // regardless of success/failure, so Drop must not cancel it.
         self.submitted = true;
         self.device.on_command_buffer_done();
         unsafe {
             if !gpu::SDL_SubmitGPUCommandBuffer(self.inner) {
-                return Err("SDL_SubmitGPUCommandBuffer failed");
+                return Err(sdl_fail("SDL_SubmitGPUCommandBuffer"));
             }
         }
         Ok(())
@@ -1191,12 +1201,12 @@ impl<'a> CommandBuffer<'a> {
 }
 
 impl<'a> CommandBuffer<'a> {
-    pub fn begin_copy_pass<'b>(&'b self) -> Result<CopyPass<'b>, &'static str> {
+    pub fn begin_copy_pass<'b>(&'b self) -> Result<CopyPass<'b>, String> {
         assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         unsafe {
             let raw = gpu::SDL_BeginGPUCopyPass(self.inner);
             if raw.is_null() {
-                return Err("SDL_BeginGPUCopyPass failed");
+                return Err(sdl_fail("SDL_BeginGPUCopyPass"));
             }
             self.pass_active.set(true);
             Ok(CopyPass { inner: raw, device: self.device, pass_active: &self.pass_active })
@@ -1206,7 +1216,7 @@ impl<'a> CommandBuffer<'a> {
         &'b self,
         color_targets: &[ColorTargetInfo],
         depth_stencil_target: Option<&DepthStencilTargetInfo>,
-    ) -> Result<RenderPass<'b>, &'static str> {
+    ) -> Result<RenderPass<'b>, String> {
         assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         let raw_targets: Vec<gpu::SDL_GPUColorTargetInfo> = color_targets
             .iter()
@@ -1227,7 +1237,7 @@ impl<'a> CommandBuffer<'a> {
                 ds_ptr,
             );
             if raw.is_null() {
-                return Err("SDL_BeginGPURenderPass failed");
+                return Err(sdl_fail("SDL_BeginGPURenderPass"));
             }
             self.pass_active.set(true);
             Ok(RenderPass { inner: raw, cmd_buf: self.inner, device: self.device, pass_active: &self.pass_active })
@@ -1239,7 +1249,7 @@ impl<'a> CommandBuffer<'a> {
         &'b self,
         storage_texture_bindings: &[StorageTextureReadWriteBinding],
         storage_buffer_bindings: &[StorageBufferReadWriteBinding],
-    ) -> Result<ComputePass<'b>, &'static str> {
+    ) -> Result<ComputePass<'b>, String> {
         assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         let raw_tex_bindings: Vec<gpu::SDL_GPUStorageTextureReadWriteBinding> = storage_texture_bindings
             .iter()
@@ -1272,7 +1282,7 @@ impl<'a> CommandBuffer<'a> {
                 raw_buf_bindings.len() as u32,
             );
             if raw.is_null() {
-                return Err("SDL_BeginGPUComputePass failed");
+                return Err(sdl_fail("SDL_BeginGPUComputePass"));
             }
             self.pass_active.set(true);
             Ok(ComputePass { inner: raw, cmd_buf: self.inner, device: self.device, pass_active: &self.pass_active })
