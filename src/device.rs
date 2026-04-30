@@ -868,6 +868,21 @@ impl Device {
         }
         Ok(())
     }
+
+    /// Wait for multiple fences. If `wait_all` is true, waits for all fences;
+    /// otherwise waits for any one fence.
+    pub fn wait_for_fences(&self, fences: &[Fence<'_>], wait_all: bool) -> Result<(), String> {
+        if fences.is_empty() {
+            return Ok(());
+        }
+        let ptrs: Vec<*mut gpu::SDL_GPUFence> = fences.iter().map(|f| f.inner).collect();
+        unsafe {
+            if !gpu::SDL_WaitForGPUFences(self.inner, wait_all, ptrs.as_ptr(), ptrs.len() as u32) {
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+        }
+        Ok(())
+    }
 }
 
 struct TextureSlot {
@@ -967,6 +982,17 @@ impl ComputePipeline {
         self.0 = -1;
     }
 }
+
+impl Default for ComputePipeline {
+    fn default() -> Self {
+        Self
+        {
+            0: -1
+        }
+    }    
+}
+
+
 
 /// Handle to a GPU buffer stored in a `Device`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1186,6 +1212,19 @@ impl<'a> CommandBuffer<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Submit the command buffer and return a fence that can be waited on.
+    pub fn submit_and_acquire_fence(mut self) -> Result<Fence<'a>, String> {
+        self.submitted = true;
+        self.device.on_command_buffer_done();
+        unsafe {
+            let fence_ptr = gpu::SDL_SubmitGPUCommandBufferAndAcquireFence(self.inner);
+            if fence_ptr.is_null() {
+                return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
+            }
+            Ok(Fence { inner: fence_ptr, device: self.device })
+        }
     }
 }
 
@@ -1624,6 +1663,34 @@ impl Drop for CommandBuffer<'_> {
                 gpu::SDL_CancelGPUCommandBuffer(self.inner);
             }
             self.device.on_command_buffer_done();
+        }
+    }
+}
+
+pub struct Fence<'a> {
+    inner: *mut gpu::SDL_GPUFence,
+    device: &'a Device,
+}
+
+impl<'a> Fence<'a> {
+    pub fn wait(&self) -> Result<(), String> {
+        unsafe {
+            if !gpu::SDL_WaitForGPUFences(self.device.inner, true, &self.inner, 1) {
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn query(&self) -> bool {
+        unsafe { gpu::SDL_QueryGPUFence(self.device.inner, self.inner) }
+    }
+}
+
+impl<'a> Drop for Fence<'a> {
+    fn drop(&mut self) {
+        unsafe {
+            gpu::SDL_ReleaseGPUFence(self.device.inner, self.inner);
         }
     }
 }
