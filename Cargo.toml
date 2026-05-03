@@ -1,6 +1,6 @@
 [package]
 name = "sdl3_gs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Safe Rust wrapper around SDL3's GPU API"
 license = "MIT"
@@ -16,7 +16,8 @@ sdl-lean-and-mean = ["sdl3-sys/sdl-lean-and-mean"]
 link-framework = ["sdl3-sys/link-framework"]
 
 [dependencies]
-sdl3-sys = { version = "=0.6.0" }
+sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
+#sdl3-sys = { version = "0.6" }
 bytemuck = { version = "1", features = ["derive"] }
 
 [lib]

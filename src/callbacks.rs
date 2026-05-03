@@ -1,3 +1,9 @@
+/*
+Replacement for  sdl3-sys/sdl3-main
+The original sdl3-sys/sdl3-main didn't work on Android and iOS as the SDL_Main 
+wasn't exposed in the library build.
+*/
+
 use crate::event::{parse_event, Event};
 use sdl3_sys as sys;
 use sys::events::SDL_Event;
