@@ -757,7 +757,7 @@ impl Device {
     }
 
     /// Download data from a GPU buffer into a Vec<u8>.
-    pub fn download_from_buffer(&self, buffer: GPUBuffer, offset: u32, size: u32) -> Result<Vec<u8>, String> {
+    pub fn download_from_buffer_raw(&self, buffer: GPUBuffer, offset: u32, size: u32) -> Result<Vec<u8>, String> {
         let buf_size = self.buffers.with(buffer.0, |slot| slot.size);
         let size = if size == 0 { buf_size - offset } else { size };
         if offset.saturating_add(size) > buf_size {
@@ -806,6 +806,19 @@ impl Device {
 
             Ok(data)
         }
+    }
+
+    /// Download data from a GPU buffer into a value implementing [`bytemuck::Pod`].
+    pub fn download_from_buffer<T: bytemuck::Pod>(
+        &self,
+        buffer: GPUBuffer,
+        offset: u32,
+        dst: &mut T,
+    ) -> Result<(), String> {
+        let size = std::mem::size_of::<T>() as u32;
+        let data = self.download_from_buffer_raw(buffer, offset, size)?;
+        *dst = *bytemuck::from_bytes::<T>(&data);
+        Ok(())
     }
 
     pub fn get_swapchain_texture_format(&self) -> SDL_GPUTextureFormat {

@@ -227,7 +227,7 @@ impl Renderer {
         }
     }
 
-    fn render_frame(&mut self, device: &Device) -> Result<(), &'static str> {
+    fn render_frame(&mut self, device: &Device) -> Result<(), String> {
         let mut cmd = device.acquire_command_buffer()?;
         let Some(_swapchain) = cmd.acquire_swapchain_texture()? else {
             return Ok(());
@@ -303,7 +303,7 @@ fn run_compute_fill(device: &Device) {
     }
     cmd.submit().expect("Failed to submit compute command buffer");
 
-    let data = device.download_from_buffer(buffer, 0, 0)
+    let data = device.download_from_buffer_raw(buffer, 0, 0)
         .expect("Failed to download buffer");
     let values: &[u32] = bytemuck::cast_slice(&data);
     
