@@ -558,8 +558,15 @@ impl Device {
         }
     }
 
-
     pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, String> {
+        let mut newbuf = self.create_buffer_sub(usage, size)?;
+        
+        let zerodata = vec![0u8;size as usize];
+        self.update_buffer(&mut newbuf,None,usage,zerodata.as_slice())?;
+        Ok(newbuf)
+    }
+
+    fn create_buffer_sub(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, String> {
         let info = gpu::SDL_GPUBufferCreateInfo {
             usage,
             size,
@@ -714,7 +721,7 @@ impl Device {
             if buffer.is_valid() {
                 buffer.destroy(self);
             }
-            *buffer = self.create_buffer(usage, size)?;
+            *buffer = self.create_buffer_sub(usage, size)?;
         }
         self.upload_to_buffer(copy_pass, *buffer, 0, data)
     }
@@ -731,7 +738,7 @@ impl Device {
             if buffer.is_valid() {
                 buffer.destroy(self);
             }
-            *buffer = self.create_buffer(usage, size)?;
+            *buffer = self.create_buffer_sub(usage, size)?;
         }
         Ok(())
     }
@@ -892,6 +899,17 @@ impl Device {
         unsafe {
             if !gpu::SDL_WaitForGPUFences(self.inner, wait_all, ptrs.as_ptr(), ptrs.len() as u32) {
                 return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Block until all GPU work is complete. Equivalent to SDL_WaitForGPUIdle.
+    /// Expensive — use only for debugging synchronization issues.
+    pub fn wait_idle(&self) -> Result<(), String> {
+        unsafe {
+            if !gpu::SDL_WaitForGPUIdle(self.inner) {
+                return Err(sdl_fail("SDL_WaitForGPUIdle"));
             }
         }
         Ok(())

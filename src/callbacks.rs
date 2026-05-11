@@ -41,7 +41,10 @@ unsafe extern "C" fn app_init<T: App>(
             unsafe { *appstate = Box::into_raw(boxed) as *mut core::ffi::c_void };
             SDL_AppResult::CONTINUE
         }
-        Err(_) => SDL_AppResult::FAILURE,
+        Err(e) => {
+            eprintln!("App::init() failed: {e}");
+            SDL_AppResult::FAILURE
+        }
     }
 }
 
