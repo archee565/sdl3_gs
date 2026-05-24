@@ -859,10 +859,10 @@ impl Device {
     }
 
     /// Get the device properties for this device
-    pub fn get_device_properties(&self) -> sys::properties::SDL_PropertiesID {
+    pub fn get_device_properties(&self) -> crate::properties::Properties {
         unsafe
         {
-            sys::gpu::SDL_GetGPUDeviceProperties(self.inner)
+            crate::properties::Properties::from_raw(sys::gpu::SDL_GetGPUDeviceProperties(self.inner))
         }
     }
 
