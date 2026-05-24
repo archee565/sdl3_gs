@@ -361,14 +361,27 @@ impl Device {
         self.window.as_ref()
     }
 
-    pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>) -> Result<Self,String>
+    pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>, properties : Option<sys::properties::SDL_PropertiesID>) -> Result<Self,String>
     {
         unsafe {
-            let sys_device = gpu::SDL_CreateGPUDevice(
-                format,
-                true,
-                std::ptr::null(),
-            );
+            let sys_device = if let Some(props) = properties {
+                if format & gpu::SDL_GPUShaderFormat::DXIL != gpu::SDL_GPUShaderFormat(0) {
+                    sys::properties::SDL_SetBooleanProperty(props, gpu::SDL_PROP_GPU_DEVICE_CREATE_SHADERS_DXIL_BOOLEAN, true);
+                }
+                if format & gpu::SDL_GPUShaderFormat::SPIRV != gpu::SDL_GPUShaderFormat(0) {
+                    sys::properties::SDL_SetBooleanProperty(props, gpu::SDL_PROP_GPU_DEVICE_CREATE_SHADERS_SPIRV_BOOLEAN, true);
+                }
+                if format & gpu::SDL_GPUShaderFormat::MSL != gpu::SDL_GPUShaderFormat(0) {
+                    sys::properties::SDL_SetBooleanProperty(props, gpu::SDL_PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN, true);
+                }
+                gpu::SDL_CreateGPUDeviceWithProperties(props)
+            } else {
+                gpu::SDL_CreateGPUDevice(
+                    format,
+                    true,
+                    std::ptr::null(),
+                )
+            };
 
             if sys_device.is_null()
             {

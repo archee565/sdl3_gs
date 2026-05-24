@@ -339,7 +339,7 @@ impl App for DemoApp {
                 | sdl3_gs::SDL_WindowFlags::RESIZABLE,
         )?;
 
-        let mut device = Device::new(SDL_GPUShaderFormat::SPIRV, Some(window))
+        let mut device = Device::new(SDL_GPUShaderFormat::SPIRV, Some(window), None)
             .map_err(|e| e.to_string())?;
 
         let renderer = Renderer::new(&mut device);
