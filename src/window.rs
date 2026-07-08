@@ -1,6 +1,8 @@
 use sdl3_sys as sys;
 use sys::*;
 
+use crate::properties::Properties;
+
 /// Safe wrapper around `SDL_DisplayMode`.
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayMode {
@@ -94,6 +96,15 @@ impl  Window {
                 refresh_rate: m.refresh_rate,
                 pixel_density: m.pixel_density,
             })
+        }
+    }
+
+    pub fn get_properties(&self) -> Result<Properties, &'static str> {
+        let id = unsafe { video::SDL_GetWindowProperties(self.inner) };
+        if id == properties::SDL_PropertiesID(0) {
+            Err("SDL_GetWindowProperties failed")
+        } else {
+            Ok(Properties::from_raw(id))
         }
     }
 

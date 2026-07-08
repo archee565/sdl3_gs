@@ -141,14 +141,35 @@ impl Properties {
         unsafe { sys::properties::SDL_GetBooleanProperty(self.id, c_name.as_ptr(), default) }
     }
 
-    // -- Pointer --
+    // -- Data --
 
-    pub fn set_pointer(&self, name: &str, value: *mut std::ffi::c_void) -> Result<(), &'static str> {
+    pub fn set_data(&self, name: &str, value: &[u8]) -> Result<(), &'static str> {
         let c_name = CString::new(name).unwrap();
+        let boxed = Box::new(value.to_vec());
+        let ptr = Box::into_raw(boxed) as *mut std::ffi::c_void;
         let ok = unsafe {
-            sys::properties::SDL_SetPointerProperty(self.id, c_name.as_ptr(), value)
+            sys::properties::SDL_SetPointerPropertyWithCleanup(
+                self.id,
+                c_name.as_ptr(),
+                ptr,
+                Some(cleanup_vec),
+                std::ptr::null_mut(),
+            )
         };
         if ok { Ok(()) } else { Err(get_error()) }
+    }
+
+    pub fn get_data(&self, name: &str) -> Option<&[u8]> {
+        let c_name = CString::new(name).unwrap();
+        let ptr = unsafe {
+            sys::properties::SDL_GetPointerProperty(self.id, c_name.as_ptr(), std::ptr::null_mut())
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            let vec = unsafe { &*(ptr as *const Vec<u8>) };
+            Some(vec.as_slice())
+        }
     }
 
     pub fn get_pointer(&self, name: &str) -> *mut std::ffi::c_void {
@@ -238,6 +259,10 @@ fn get_error() -> &'static str {
         return "unknown error";
     }
     unsafe { CStr::from_ptr(ptr) }.to_str().unwrap_or("unknown error")
+}
+
+unsafe extern "C" fn cleanup_vec(_userdata: *mut std::ffi::c_void, value: *mut std::ffi::c_void) {
+    let _ = unsafe { Box::from_raw(value as *mut Vec<u8>) };
 }
 
 // ---------------------------------------------------------------------------
