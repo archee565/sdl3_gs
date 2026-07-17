@@ -12,6 +12,8 @@ pub use sdl3_sys as sys;
 pub use sdl3_sys::init::*;
 pub use sdl3_sys::video::*;
 
+pub use device::{SDL_GPUPresentMode, SDL_GPUSwapchainComposition};
+
 pub fn sdl_init(flags : SDL_InitFlags)
 {
     unsafe

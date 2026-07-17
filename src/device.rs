@@ -42,6 +42,8 @@ pub use sys::pixels::SDL_FColor;
 pub use sys::rect::SDL_Rect;
 pub use sys::surface::SDL_FlipMode;
 pub use gpu::SDL_GPUViewport;
+pub use gpu::SDL_GPUPresentMode;
+pub use gpu::SDL_GPUSwapchainComposition;
 
 use crate::slot_map::SlotMapRefCell;
 
@@ -426,6 +428,35 @@ impl Device {
     pub fn claim_window(&self) {
         if let Some(window) = &self.window {
             unsafe { gpu::SDL_ClaimWindowForGPUDevice(self.inner, window.raw()); }
+        }
+    }
+
+    /// Set the swapchain composition and present mode.
+    /// Returns false if no window is associated with the device.
+    pub fn set_swapchain_parameters(
+        &self,
+        swapchain_composition: gpu::SDL_GPUSwapchainComposition,
+        present_mode: gpu::SDL_GPUPresentMode,
+    ) -> bool {
+        if let Some(window) = &self.window {
+            unsafe {
+                gpu::SDL_SetGPUSwapchainParameters(self.inner, window.raw(), swapchain_composition, present_mode)
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Configure the maximum number of frames that can be pending on the GPU.
+    ///
+    /// Default is 2, valid range is 1–3. Lower values reduce latency at the
+    /// expense of throughput; higher values increase throughput at the expense
+    /// of latency.
+    ///
+    /// Returns true on success, false on error.
+    pub fn set_allowed_frames_in_flight(&self, allowed_frames_in_flight: u32) -> bool {
+        unsafe {
+            gpu::SDL_SetGPUAllowedFramesInFlight(self.inner, allowed_frames_in_flight)
         }
     }
 
