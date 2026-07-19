@@ -19,6 +19,7 @@ link-framework = ["sdl3-sys/link-framework"]
 #sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
 sdl3-sys = { version = "0.6" }
 bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
 
 [lib]
 name = "sdl3_gs"

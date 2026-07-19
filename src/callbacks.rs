@@ -42,7 +42,7 @@ unsafe extern "C" fn app_init<T: App>(
             SDL_AppResult::CONTINUE
         }
         Err(e) => {
-            eprintln!("App::init() failed: {e}");
+            log::error!("App::init() failed: {e}");
             SDL_AppResult::FAILURE
         }
     }

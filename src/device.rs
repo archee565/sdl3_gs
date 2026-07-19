@@ -48,7 +48,7 @@ pub use gpu::SDL_GPUSwapchainComposition;
 use crate::slot_map::SlotMapRefCell;
 
 fn sdl_err() -> String {
-    unsafe { std::ffi::CStr::from_ptr(sys::error::SDL_GetError()).to_string_lossy().into_owned() }
+    crate::sdl_get_error()
 }
 
 fn sdl_fail(context: &str) -> String {
