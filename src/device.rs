@@ -666,7 +666,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUSampler"));
             }
             Ok(Sampler {
-                inner: Rc::new(RefCell::new(SamplerData(raw, Rc::downgrade(&self.inner)))),
+                inner: Rc::new(SamplerData(raw, Rc::downgrade(&self.inner))),
             })
         }
     }
@@ -1376,21 +1376,20 @@ impl Default for GPUBuffer {
 
 thread_local! {
     static NONE_SAMPLER: Sampler = Sampler {
-        inner: Rc::new(RefCell::new(SamplerData(std::ptr::null_mut(), Weak::new()))),
+        inner: Rc::new(SamplerData(std::ptr::null_mut(), Weak::new())),
     };
 }
 
 /// Handle to a GPU sampler stored in a `Device`.
 #[derive(Clone)]
 pub struct Sampler {
-    pub(crate) inner: Rc<RefCell<SamplerData>>,
+    pub(crate) inner: Rc<SamplerData>,
 }
 
 impl std::fmt::Debug for Sampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sd = self.inner.borrow();
         f.debug_struct("Sampler")
-            .field("raw", &(sd.0 as usize))
+            .field("raw", &(self.inner.0 as usize))
             .finish()
     }
 }
@@ -1421,11 +1420,11 @@ impl Sampler {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.borrow().0.is_null()
+        !self.inner.0.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUSampler {
-        self.inner.borrow().0
+        self.inner.0
     }
 }
 
