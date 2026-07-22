@@ -12,7 +12,7 @@ Work in progress
 - **Safe public API** — All `unsafe` SDL3 calls are encapsulated internally; the public surface is safe Rust.
 - **Thin abstraction** — The wrapper stays close to SDL3's GPU API design, making it easy to follow SDL3 documentation and examples while writing Rust.
 
-The crate builds on [`sdl3-sys`](https://crates.io/crates/sdl3-sys) (v0.6.1, targeting SDL 3.4.2) for raw FFI bindings.
+The crate builds on [`sdl3-sys`](https://crates.io/crates/sdl3-sys) for raw FFI bindings.
 
 ## Status
 

@@ -70,9 +70,9 @@ impl MsaaTargets {
         Self { msaa, resolve, width, height }
     }
 
-    fn destroy(&mut self, device: &Device) {
-        self.msaa.destroy(device);
-        self.resolve.destroy(device);
+    fn destroy(&mut self, _device: &Device) {
+        self.msaa = Texture::none();
+        self.resolve = Texture::none();
     }
 }
 
@@ -189,8 +189,7 @@ impl Renderer {
             props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
         }).expect("Failed to create checkerboard texture");
 
-        let region = TextureRegion::full(checkerboard_texture, device);
-        device.upload_to_texture(None, &region, &pixels)
+        checkerboard_texture.upload(&pixels)
             .expect("Failed to upload checkerboard data");
 
         // Sampler
@@ -233,18 +232,18 @@ impl Renderer {
             return Ok(());
         };
 
-        let (sw, sh) = cmd.device().get_texture_res(Texture::SWAPCHAIN);
+        let (sw, sh) = cmd.device().swapchain_texture().res();
 
         if self.targets.width != sw || self.targets.height != sh {
             self.targets.destroy(device);
             self.targets = MsaaTargets::create(device, sw, sh, self.swapchain_format);
         }
 
-        let mut target = ColorTargetInfo::new(self.targets.msaa);
+        let mut target = ColorTargetInfo::new(self.targets.msaa.clone());
         target.clear_color = SDL_FColor { r: 0.1, g: 0.1, b: 0.1, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
         target.store_op = SDL_GPUStoreOp::RESOLVE;
-        target.resolve_texture = Some(Texture::SWAPCHAIN);
+        target.resolve_texture = Some(device.swapchain_texture());
         target.cycle = true;
         target.cycle_resolve_texture = true;
 
@@ -253,8 +252,8 @@ impl Renderer {
         pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: self.vertex_buffer, offset: 0 }]);
         pass.bind_index_buffer(&GPUBufferBinding { buffer: self.index_buffer, offset: 0 }, SDL_GPUIndexElementSize::_16BIT);
         pass.bind_fragment_samplers(0, &[TextureSamplerBinding {
-            texture: self.checkerboard_texture,
-            sampler: self.sampler,
+            texture: self.checkerboard_texture.clone(),
+            sampler: self.sampler.clone(),
         }]);
         let tint_color: [f32; 4] = [1.0, 0.8, 0.5, 1.0];
         pass.push_fragment_uniform_data(0, bytemuck::cast_slice(&tint_color));

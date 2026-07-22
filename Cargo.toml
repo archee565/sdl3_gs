@@ -14,6 +14,7 @@ build-from-source-static = ["sdl3-sys/build-from-source-static"]
 link-static = ["sdl3-sys/link-static"]
 sdl-lean-and-mean = ["sdl3-sys/sdl-lean-and-mean"]
 link-framework = ["sdl3-sys/link-framework"]
+verbose = []
 
 [dependencies]
 #sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
