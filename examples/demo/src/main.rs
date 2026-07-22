@@ -225,11 +225,11 @@ impl Renderer {
 
     fn render_frame(&mut self, device: &Device) -> Result<(), String> {
         let mut cmd = device.acquire_command_buffer()?;
-        let Some(_swapchain) = cmd.acquire_swapchain_texture()? else {
+        let Some(swapchain) = cmd.acquire_swapchain_texture()? else {
             return Ok(());
         };
 
-        let (sw, sh) = cmd.device().swapchain_texture().res();
+        let (sw, sh) = swapchain.res();
 
         if self.targets.width != sw || self.targets.height != sh {
             self.targets.destroy(device);
@@ -240,7 +240,7 @@ impl Renderer {
         target.clear_color = SDL_FColor { r: 0.1, g: 0.1, b: 0.1, a: 1.0 };
         target.load_op = SDL_GPULoadOp::CLEAR;
         target.store_op = SDL_GPUStoreOp::RESOLVE;
-        target.resolve_texture = Some(device.swapchain_texture());
+        target.resolve_texture = Some(swapchain);
         target.cycle = true;
         target.cycle_resolve_texture = true;
 

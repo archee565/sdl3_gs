@@ -1,7 +1,6 @@
 //#![allow(unused)]
 pub mod device;
 pub mod event;
-pub mod slot_map;
 pub mod window;
 pub mod tools;
 pub mod callbacks;

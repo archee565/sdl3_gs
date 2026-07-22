@@ -1,6 +1,6 @@
 [package]
 name = "sdl3_gs"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Safe Rust wrapper around SDL3's GPU API"
 license = "MIT"
@@ -19,7 +19,7 @@ verbose = []
 [dependencies]
 #sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
 sdl3-sys = { version = "0.6" }
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 log = "0.4"
 
 [lib]
