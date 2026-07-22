@@ -345,7 +345,6 @@ pub struct ShaderCreateInfo<'a> {
 
 struct DeviceInner {
     raw: *mut gpu::SDL_GPUDevice,
-    shaders: SlotMapRefCell<ShaderSlot>,
     graphics_pipelines: SlotMapRefCell<GraphicsPipelineSlot>,
     compute_pipelines: SlotMapRefCell<ComputePipelineSlot>,
     buffers: SlotMapRefCell<BufferSlot>,
@@ -427,7 +426,6 @@ impl Device {
             let inner = DeviceInner {
                 raw: sys_device,
                 swapchain_texture: Texture::none(),
-                shaders: SlotMapRefCell::default(),
                 graphics_pipelines: SlotMapRefCell::default(),
                 compute_pipelines: SlotMapRefCell::default(),
                 buffers: SlotMapRefCell::default(),
@@ -536,12 +534,13 @@ impl Device {
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
-            let raw = gpu::SDL_CreateGPUShader(        self.raw(), &raw_info);
+            let raw = gpu::SDL_CreateGPUShader(self.raw(), &raw_info);
             if raw.is_null() {
                 return Err(sdl_fail("SDL_CreateGPUShader"));
             }
-            let idx = self.inner().shaders.insert(ShaderSlot { inner: raw });
-            Ok(Shader(idx))
+            Ok(Shader {
+                inner: Rc::new(RefCell::new(ShaderData(raw, Rc::downgrade(&self.inner)))),
+            })
         }
     }
 
@@ -550,8 +549,8 @@ impl Device {
     pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, String> {
         validate_sample_count(info.multisample_state.sample_count)?;
         let di = self.inner();
-        let vertex_shader_raw = di.shaders.with(info.vertex_shader.0, |s| s.inner);
-        let fragment_shader_raw = di.shaders.with(info.fragment_shader.0, |s| s.inner);
+        let vertex_shader_raw = info.vertex_shader.raw();
+        let fragment_shader_raw = info.fragment_shader.raw();
         let raw_info = gpu::SDL_GPUGraphicsPipelineCreateInfo {
             vertex_shader: vertex_shader_raw,
             fragment_shader: fragment_shader_raw,
@@ -1042,8 +1041,22 @@ impl Drop for TextureData {
     }
 }
 
-struct ShaderSlot {
-    inner: *mut gpu::SDL_GPUShader,
+pub(crate) struct ShaderData(*mut gpu::SDL_GPUShader, Weak<RefCell<DeviceInner>>);
+
+impl Drop for ShaderData {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        if let Some(di) = self.1.upgrade() {
+            let di = di.borrow();
+            unsafe {
+                gpu::SDL_ReleaseGPUShader(di.raw, self.0);
+            }
+        } else if cfg!(feature = "verbose") {
+            ::log::warn!("Shader dropped after device was destroyed (leak)");
+        }
+    }
 }
 
 struct GraphicsPipelineSlot {
@@ -1189,17 +1202,57 @@ impl Texture {
     }
 }
 
-/// Handle to a shader stored in a `Device`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Shader(pub i32);
+thread_local! {
+    static NONE_SHADER: Shader = Shader {
+        inner: Rc::new(RefCell::new(ShaderData(std::ptr::null_mut(), Weak::new()))),
+    };
+}
+
+#[derive(Clone)]
+pub struct Shader {
+    pub(crate) inner: Rc<RefCell<ShaderData>>,
+}
+
+impl std::fmt::Debug for Shader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sd = self.inner.borrow();
+        f.debug_struct("Shader")
+            .field("raw", &(sd.0 as usize))
+            .finish()
+    }
+}
+
+impl PartialEq for Shader {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::as_ptr(&self.inner) == Rc::as_ptr(&other.inner)
+    }
+}
+
+impl Eq for Shader {}
+
+impl std::hash::Hash for Shader {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.inner).hash(state);
+    }
+}
+
+impl Default for Shader {
+    fn default() -> Self {
+        Shader::none()
+    }
+}
 
 impl Shader {
-    pub fn destroy(&mut self, device: &Device) {
-        let slot = device.inner().shaders.remove(self.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUShader(device.raw(), slot.inner);
-        }
-        self.0 = -1;
+    pub fn none() -> Shader {
+        NONE_SHADER.with(|s| s.clone())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.inner.borrow().0.is_null()
+    }
+
+    pub fn raw(&self) -> *mut gpu::SDL_GPUShader {
+        self.inner.borrow().0
     }
 }
 
@@ -1994,9 +2047,6 @@ impl Drop for Device {
             });
             di.compute_pipelines.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUComputePipeline(r, slot.inner);
-            });
-            di.shaders.for_each(|_, slot| {
-                gpu::SDL_ReleaseGPUShader(r, slot.inner);
             });
             di.fences.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUFence(r, slot.inner);

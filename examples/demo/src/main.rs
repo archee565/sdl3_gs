@@ -155,9 +155,6 @@ impl Renderer {
             has_depth_stencil_target: false,
         }).expect("Failed to create graphics pipeline");
 
-        vertex_shader.destroy(device);
-        fragment_shader.destroy(device);
-
         // Vertex buffer
         let vertex_data_size = std::mem::size_of_val(&QUAD_VERTICES) as u32;
         let vertex_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::VERTEX, vertex_data_size)
