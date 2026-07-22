@@ -476,12 +476,12 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUTexture"));
             }
             Ok(Texture {
-                inner: Rc::new(RefCell::new(TextureData(
+                inner: Rc::new(RefCell::new(TextureData {
                     raw,
-                    (info.width, info.height),
-                    Rc::downgrade(&self.inner),
-                    TextureKind::Regular,
-                ))),
+                    res: (info.width, info.height),
+                    device: Rc::downgrade(&self.inner),
+                    kind: TextureKind::Regular,
+                })),
             })
         }
     }
@@ -508,7 +508,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUShader"));
             }
             Ok(Shader {
-                inner: Rc::new(RefCell::new(ShaderData(raw, Rc::downgrade(&self.inner)))),
+                inner: Rc::new(RefCell::new(ShaderData { raw, device: Rc::downgrade(&self.inner) })),
             })
         }
     }
@@ -562,7 +562,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUGraphicsPipeline"));
             }
             Ok(GraphicsPipeline {
-                inner: Rc::new(GraphicsPipelineData(raw, Rc::downgrade(&self.inner))),
+                inner: Rc::new(GraphicsPipelineData { raw, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
@@ -593,7 +593,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUComputePipeline"));
             }
             Ok(ComputePipeline {
-                inner: Rc::new(ComputePipelineData(raw, Rc::downgrade(&self.inner))),
+                inner: Rc::new(ComputePipelineData { raw, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
@@ -617,7 +617,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUBuffer"));
             }
             Ok(GPUBuffer {
-                inner: Rc::new(GPUBufferData(raw, size, Rc::downgrade(&self.inner))),
+                inner: Rc::new(GPUBufferData { raw, size, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
@@ -630,7 +630,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUSampler"));
             }
             Ok(Sampler {
-                inner: Rc::new(SamplerData(raw, Rc::downgrade(&self.inner))),
+                inner: Rc::new(SamplerData { raw, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
@@ -819,7 +819,7 @@ impl Device {
     fn wait_for_fence(&self, fence: &Fence) -> Result<(), String> {
         if !fence.is_valid() { return Err( String::from("Invalid fence"));  }
         unsafe {
-            if !gpu::SDL_WaitForGPUFences(        self.raw(), true, &fence.inner.0, 1) {
+            if !gpu::SDL_WaitForGPUFences(        self.raw(), true, &fence.inner.raw, 1) {
                 return Err(sdl_fail("SDL_WaitForGPUFences"));
             }
         }
@@ -830,7 +830,7 @@ impl Device {
     pub fn query_fence(&self, fence: &Fence) -> bool {
         assert!(fence.is_valid());
         unsafe {
-            gpu::SDL_QueryGPUFence(        self.raw(), fence.inner.0)
+            gpu::SDL_QueryGPUFence(        self.raw(), fence.inner.raw)
         }
     }
 
@@ -849,7 +849,7 @@ impl Device {
         }
         let mut ptrs: Vec<*mut gpu::SDL_GPUFence> = Vec::with_capacity(fences.len());
         for f in fences {
-            ptrs.push(f.inner.0);
+            ptrs.push(f.inner.raw);
         }
         unsafe {
             if !gpu::SDL_WaitForGPUFences(        self.raw(), wait_all, ptrs.as_ptr(), ptrs.len() as u32) {
@@ -874,21 +874,21 @@ impl Device {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextureKind { Regular, Swapchain, None }
 
-pub(crate) struct TextureData(
-    *mut gpu::SDL_GPUTexture,
-    (u32, u32),
-    Weak<RefCell<DeviceInner>>,
-    TextureKind,
-);
+pub(crate) struct TextureData {
+    pub(crate) raw: *mut gpu::SDL_GPUTexture,
+    pub(crate) res: (u32, u32),
+    device: Weak<RefCell<DeviceInner>>,
+    pub(crate) kind: TextureKind,
+}
 
 impl Drop for TextureData {
     fn drop(&mut self) {
-        if self.3 == TextureKind::Swapchain || self.0.is_null() {
+        if self.kind == TextureKind::Swapchain || self.raw.is_null() {
             return;
         }
-        match self.2.upgrade() {
+        match self.device.upgrade() {
             Some(di) => unsafe {
-                gpu::SDL_ReleaseGPUTexture(di.borrow().raw, self.0);
+                gpu::SDL_ReleaseGPUTexture(di.borrow().raw, self.raw);
             },
             None => {
                 #[cfg(feature = "verbose")]
@@ -898,17 +898,20 @@ impl Drop for TextureData {
     }
 }
 
-pub(crate) struct ShaderData(*mut gpu::SDL_GPUShader, Weak<RefCell<DeviceInner>>);
+pub(crate) struct ShaderData {
+    pub(crate) raw: *mut gpu::SDL_GPUShader,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for ShaderData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.1.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUShader(di.raw, self.0);
+                gpu::SDL_ReleaseGPUShader(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("Shader dropped after device was destroyed (leak)");
@@ -916,17 +919,20 @@ impl Drop for ShaderData {
     }
 }
 
-pub(crate) struct GraphicsPipelineData(*mut gpu::SDL_GPUGraphicsPipeline, Weak<RefCell<DeviceInner>>);
+pub(crate) struct GraphicsPipelineData {
+    pub(crate) raw: *mut gpu::SDL_GPUGraphicsPipeline,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for GraphicsPipelineData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.1.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUGraphicsPipeline(di.raw, self.0);
+                gpu::SDL_ReleaseGPUGraphicsPipeline(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("GraphicsPipeline dropped after device was destroyed (leak)");
@@ -934,17 +940,20 @@ impl Drop for GraphicsPipelineData {
     }
 }
 
-pub(crate) struct ComputePipelineData(*mut gpu::SDL_GPUComputePipeline, Weak<RefCell<DeviceInner>>);
+pub(crate) struct ComputePipelineData {
+    pub(crate) raw: *mut gpu::SDL_GPUComputePipeline,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for ComputePipelineData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.1.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUComputePipeline(di.raw, self.0);
+                gpu::SDL_ReleaseGPUComputePipeline(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("ComputePipeline dropped after device was destroyed (leak)");
@@ -952,17 +961,21 @@ impl Drop for ComputePipelineData {
     }
 }
 
-pub(crate) struct GPUBufferData(pub(crate) *mut gpu::SDL_GPUBuffer, pub(crate) u32, Weak<RefCell<DeviceInner>>);
+pub(crate) struct GPUBufferData {
+    pub(crate) raw: *mut gpu::SDL_GPUBuffer,
+    pub(crate) size: u32,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for GPUBufferData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.2.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUBuffer(di.raw, self.0);
+                gpu::SDL_ReleaseGPUBuffer(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("GPUBuffer dropped after device was destroyed (leak)");
@@ -970,17 +983,20 @@ impl Drop for GPUBufferData {
     }
 }
 
-pub(crate) struct SamplerData(*mut gpu::SDL_GPUSampler, Weak<RefCell<DeviceInner>>);
+pub(crate) struct SamplerData {
+    pub(crate) raw: *mut gpu::SDL_GPUSampler,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for SamplerData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.1.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUSampler(di.raw, self.0);
+                gpu::SDL_ReleaseGPUSampler(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("Sampler dropped after device was destroyed (leak)");
@@ -988,17 +1004,20 @@ impl Drop for SamplerData {
     }
 }
 
-pub(crate) struct FenceData(pub(crate) *mut gpu::SDL_GPUFence, Weak<RefCell<DeviceInner>>);
+pub(crate) struct FenceData {
+    pub(crate) raw: *mut gpu::SDL_GPUFence,
+    device: Weak<RefCell<DeviceInner>>,
+}
 
 impl Drop for FenceData {
     fn drop(&mut self) {
-        if self.0.is_null() {
+        if self.raw.is_null() {
             return;
         }
-        if let Some(di) = self.1.upgrade() {
+        if let Some(di) = self.device.upgrade() {
             let di = di.borrow();
             unsafe {
-                gpu::SDL_ReleaseGPUFence(di.raw, self.0);
+                gpu::SDL_ReleaseGPUFence(di.raw, self.raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("Fence dropped after device was destroyed (leak)");
@@ -1016,8 +1035,8 @@ impl std::fmt::Debug for Texture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let td = self.inner.borrow();
         f.debug_struct("Texture")
-            .field("raw", &(td.0 as usize))
-            .field("res", &td.1)
+            .field("raw", &(td.raw as usize))
+            .field("res", &td.res)
             .finish()
     }
 }
@@ -1026,9 +1045,9 @@ impl Texture {
     /// Upload data to the full texture. Uses the internal Weak ref for device access.
     pub fn upload(&self, data: &[u8]) -> Result<(), String> {
         let td = self.inner.borrow();
-        let di = td.2.upgrade().ok_or("Texture::upload: device dropped")?;
+        let di = td.device.upgrade().ok_or("Texture::upload: device dropped")?;
         let di = di.borrow();
-        let res = td.1;
+        let res = td.res;
         let transfer = di.stage_upload(data)?;
         let src = gpu::SDL_GPUTextureTransferInfo {
             transfer_buffer: transfer,
@@ -1037,7 +1056,7 @@ impl Texture {
             rows_per_layer: 0,
         };
         let dst = gpu::SDL_GPUTextureRegion {
-            texture: td.0,
+            texture: td.raw,
             mip_level: 0,
             layer: 0,
             x: 0,
@@ -1060,7 +1079,7 @@ impl Texture {
         data: &[u8],
     ) -> Result<(), String> {
         let td = self.inner.borrow();
-        let di = td.2.upgrade().ok_or("Texture::upload_region: device dropped")?;
+        let di = td.device.upgrade().ok_or("Texture::upload_region: device dropped")?;
         let di = di.borrow();
         let transfer = di.stage_upload(data)?;
         let src = gpu::SDL_GPUTextureTransferInfo {
@@ -1086,29 +1105,29 @@ impl Default for Texture
 impl Texture {
     pub fn none() -> Texture {
         Texture {
-            inner: Rc::new(RefCell::new(TextureData(
-                std::ptr::null_mut(), (0, 0), Weak::new(), TextureKind::None,
-            ))),
+            inner: Rc::new(RefCell::new(TextureData {
+                raw: std::ptr::null_mut(), res: (0, 0), device: Weak::new(), kind: TextureKind::None,
+            })),
         }
     }
 
     pub fn is_valid(&self) -> bool
     {
-        !self.inner.borrow().0.is_null()
+        !self.inner.borrow().raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUTexture {
-        self.inner.borrow().0
+        self.inner.borrow().raw
     }
 
     pub fn res(&self) -> (u32, u32) {
-        self.inner.borrow().1
+        self.inner.borrow().res
     }
 }
 
 thread_local! {
     static NONE_SHADER: Shader = Shader {
-        inner: Rc::new(RefCell::new(ShaderData(std::ptr::null_mut(), Weak::new()))),
+        inner: Rc::new(RefCell::new(ShaderData { raw: std::ptr::null_mut(), device: Weak::new() })),
     };
 }
 
@@ -1122,7 +1141,7 @@ impl std::fmt::Debug for Shader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sd = self.inner.borrow();
         f.debug_struct("Shader")
-            .field("raw", &(sd.0 as usize))
+            .field("raw", &(sd.raw as usize))
             .finish()
     }
 }
@@ -1153,17 +1172,17 @@ impl Shader {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.borrow().0.is_null()
+        !self.inner.borrow().raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUShader {
-        self.inner.borrow().0
+        self.inner.borrow().raw
     }
 }
 
 thread_local! {
     static NONE_GRAPHICS_PIPELINE: GraphicsPipeline = GraphicsPipeline {
-        inner: Rc::new(GraphicsPipelineData(std::ptr::null_mut(), Weak::new())),
+        inner: Rc::new(GraphicsPipelineData { raw: std::ptr::null_mut(), device: Weak::new() }),
     };
 }
 
@@ -1176,7 +1195,7 @@ pub struct GraphicsPipeline {
 impl std::fmt::Debug for GraphicsPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GraphicsPipeline")
-            .field("raw", &(self.inner.0 as usize))
+            .field("raw", &(self.inner.raw as usize))
             .finish()
     }
 }
@@ -1207,17 +1226,17 @@ impl GraphicsPipeline {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.0.is_null()
+        !self.inner.raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUGraphicsPipeline {
-        self.inner.0
+        self.inner.raw
     }
 }
 
 thread_local! {
     static NONE_COMPUTE_PIPELINE: ComputePipeline = ComputePipeline {
-        inner: Rc::new(ComputePipelineData(std::ptr::null_mut(), Weak::new())),
+        inner: Rc::new(ComputePipelineData { raw: std::ptr::null_mut(), device: Weak::new() }),
     };
 }
 
@@ -1230,7 +1249,7 @@ pub struct ComputePipeline {
 impl std::fmt::Debug for ComputePipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ComputePipeline")
-            .field("raw", &(self.inner.0 as usize))
+            .field("raw", &(self.inner.raw as usize))
             .finish()
     }
 }
@@ -1261,11 +1280,11 @@ impl ComputePipeline {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.0.is_null()
+        !self.inner.raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUComputePipeline {
-        self.inner.0
+        self.inner.raw
     }
 }
 
@@ -1273,7 +1292,7 @@ impl ComputePipeline {
 
 thread_local! {
     static NONE_GPUBUFFER: GPUBuffer = GPUBuffer {
-        inner: Rc::new(GPUBufferData(std::ptr::null_mut(), 0, Weak::new())),
+        inner: Rc::new(GPUBufferData { raw: std::ptr::null_mut(), size: 0, device: Weak::new() }),
     };
 }
 
@@ -1286,8 +1305,8 @@ pub struct GPUBuffer {
 impl std::fmt::Debug for GPUBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GPUBuffer")
-            .field("raw", &(self.inner.0 as usize))
-            .field("size", &self.inner.1)
+            .field("raw", &(self.inner.raw as usize))
+            .field("size", &self.inner.size)
             .finish()
     }
 }
@@ -1318,15 +1337,15 @@ impl GPUBuffer {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.0.is_null()
+        !self.inner.raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUBuffer {
-        self.inner.0
+        self.inner.raw
     }
 
     pub fn size(&self) -> u32 {
-        self.inner.1
+        self.inner.size
     }
 
     pub fn upload(&self, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
@@ -1335,7 +1354,7 @@ impl GPUBuffer {
         if offset.saturating_add(data_size) > buf_size {
             return Err("data exceeds buffer size".into());
         }
-        let di = self.inner.2.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
+        let di = self.inner.device.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
         let di = di.borrow();
         let transfer = di.stage_upload(data)?;
         let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
@@ -1351,7 +1370,7 @@ impl GPUBuffer {
         if offset.saturating_add(size) > buf_size {
             return Err("requested range exceeds buffer size".into());
         }
-        let di = self.inner.2.upgrade().ok_or("GPUBuffer::download_raw: device dropped")?;
+        let di = self.inner.device.upgrade().ok_or("GPUBuffer::download_raw: device dropped")?;
         let di = di.borrow();
         let transfer = di.create_download_transfer_buffer(size)?;
         unsafe {
@@ -1408,7 +1427,7 @@ impl GPUBuffer {
 
 thread_local! {
     static NONE_SAMPLER: Sampler = Sampler {
-        inner: Rc::new(SamplerData(std::ptr::null_mut(), Weak::new())),
+        inner: Rc::new(SamplerData { raw: std::ptr::null_mut(), device: Weak::new() }),
     };
 }
 
@@ -1421,7 +1440,7 @@ pub struct Sampler {
 impl std::fmt::Debug for Sampler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sampler")
-            .field("raw", &(self.inner.0 as usize))
+            .field("raw", &(self.inner.raw as usize))
             .finish()
     }
 }
@@ -1452,11 +1471,11 @@ impl Sampler {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.0.is_null()
+        !self.inner.raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUSampler {
-        self.inner.0
+        self.inner.raw
     }
 }
 
@@ -1581,9 +1600,9 @@ impl CommandBuffer {
         }
 
         let sc = Texture {
-            inner: Rc::new(RefCell::new(TextureData(
-                texture, (width, height), Weak::new(), TextureKind::Swapchain,
-            ))),
+            inner: Rc::new(RefCell::new(TextureData {
+                raw: texture, res: (width, height), device: Weak::new(), kind: TextureKind::Swapchain,
+            })),
         };
         *self.swapchain_texture.borrow_mut() = Some(sc.clone());
         if texture.is_null() {
@@ -1617,9 +1636,9 @@ impl CommandBuffer {
         }
 
         let sc = Texture {
-            inner: Rc::new(RefCell::new(TextureData(
-                texture, (width, height), Weak::new(), TextureKind::Swapchain,
-            ))),
+            inner: Rc::new(RefCell::new(TextureData {
+                raw: texture, res: (width, height), device: Weak::new(), kind: TextureKind::Swapchain,
+            })),
         };
         *self.swapchain_texture.borrow_mut() = Some(sc.clone());
         Ok(sc)
@@ -1648,7 +1667,7 @@ impl CommandBuffer {
                 return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
             }
             let weak = Rc::downgrade(&self.device.inner);
-            Ok(Fence { inner: Rc::new(FenceData(fence_ptr, weak)) })
+            Ok(Fence { inner: Rc::new(FenceData { raw: fence_ptr, device: weak }) })
         }
     }
 }
@@ -2082,8 +2101,8 @@ impl Drop for CommandBuffer {
     fn drop(&mut self) {
         if let Some(ref sc) = *self.swapchain_texture.borrow() {
             let mut td = sc.inner.borrow_mut();
-            td.0 = std::ptr::null_mut();
-            td.1 = (0, 0);
+            td.raw = std::ptr::null_mut();
+            td.res = (0, 0);
         }
         if !self.submitted {
             unsafe {
@@ -2096,7 +2115,7 @@ impl Drop for CommandBuffer {
 
 thread_local! {
     static NONE_FENCE: Fence = Fence {
-        inner: Rc::new(FenceData(std::ptr::null_mut(), Weak::new())),
+        inner: Rc::new(FenceData { raw: std::ptr::null_mut(), device: Weak::new() }),
     };
 }
 
@@ -2109,7 +2128,7 @@ pub struct Fence {
 impl std::fmt::Debug for Fence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Fence")
-            .field("raw", &(self.inner.0 as usize))
+            .field("raw", &(self.inner.raw as usize))
             .finish()
     }
 }
@@ -2126,7 +2145,7 @@ impl Fence {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.0.is_null()
+        !self.inner.raw.is_null()
     }
 }
 
