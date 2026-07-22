@@ -268,7 +268,7 @@ impl Renderer {
 }
 
 fn run_compute_fill(device: &Device) {
-    let mut pipeline = device.create_compute_pipeline(&ComputePipelineCreateInfo {
+    let pipeline = device.create_compute_pipeline(&ComputePipelineCreateInfo {
         code: include_bytes!("fill_array.comp.spv"),
         entrypoint: "main",
         format: SDL_GPUShaderFormat::SPIRV,
