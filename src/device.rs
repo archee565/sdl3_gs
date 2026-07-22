@@ -345,7 +345,6 @@ pub struct ShaderCreateInfo<'a> {
 
 struct DeviceInner {
     raw: *mut gpu::SDL_GPUDevice,
-    graphics_pipelines: SlotMapRefCell<GraphicsPipelineSlot>,
     compute_pipelines: SlotMapRefCell<ComputePipelineSlot>,
     buffers: SlotMapRefCell<BufferSlot>,
     fences: SlotMapRefCell<FenceSlot>,
@@ -426,7 +425,6 @@ impl Device {
             let inner = DeviceInner {
                 raw: sys_device,
                 swapchain_texture: Texture::none(),
-                graphics_pipelines: SlotMapRefCell::default(),
                 compute_pipelines: SlotMapRefCell::default(),
                 buffers: SlotMapRefCell::default(),
                 fences: SlotMapRefCell::default(),
@@ -548,7 +546,6 @@ impl Device {
     #[allow(deprecated)]
     pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, String> {
         validate_sample_count(info.multisample_state.sample_count)?;
-        let di = self.inner();
         let vertex_shader_raw = info.vertex_shader.raw();
         let fragment_shader_raw = info.fragment_shader.raw();
         let raw_info = gpu::SDL_GPUGraphicsPipelineCreateInfo {
@@ -593,8 +590,9 @@ impl Device {
             if raw.is_null() {
                 return Err(sdl_fail("SDL_CreateGPUGraphicsPipeline"));
             }
-            let idx = di.graphics_pipelines.insert(GraphicsPipelineSlot { inner: raw });
-            Ok(GraphicsPipeline(idx))
+            Ok(GraphicsPipeline {
+                inner: Rc::new(GraphicsPipelineData(raw, Rc::downgrade(&self.inner))),
+            })
         }
     }
 
@@ -1059,8 +1057,22 @@ impl Drop for ShaderData {
     }
 }
 
-struct GraphicsPipelineSlot {
-    inner: *mut gpu::SDL_GPUGraphicsPipeline,
+pub(crate) struct GraphicsPipelineData(*mut gpu::SDL_GPUGraphicsPipeline, Weak<RefCell<DeviceInner>>);
+
+impl Drop for GraphicsPipelineData {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        if let Some(di) = self.1.upgrade() {
+            let di = di.borrow();
+            unsafe {
+                gpu::SDL_ReleaseGPUGraphicsPipeline(di.raw, self.0);
+            }
+        } else if cfg!(feature = "verbose") {
+            ::log::warn!("GraphicsPipeline dropped after device was destroyed (leak)");
+        }
+    }
 }
 
 struct ComputePipelineSlot {
@@ -1256,17 +1268,57 @@ impl Shader {
     }
 }
 
+thread_local! {
+    static NONE_GRAPHICS_PIPELINE: GraphicsPipeline = GraphicsPipeline {
+        inner: Rc::new(GraphicsPipelineData(std::ptr::null_mut(), Weak::new())),
+    };
+}
+
 /// Handle to a graphics pipeline stored in a `Device`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct GraphicsPipeline(pub i32);
+#[derive(Clone)]
+pub struct GraphicsPipeline {
+    pub(crate) inner: Rc<GraphicsPipelineData>,
+}
+
+impl std::fmt::Debug for GraphicsPipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphicsPipeline")
+            .field("raw", &(self.inner.0 as usize))
+            .finish()
+    }
+}
+
+impl PartialEq for GraphicsPipeline {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::as_ptr(&self.inner) == Rc::as_ptr(&other.inner)
+    }
+}
+
+impl Eq for GraphicsPipeline {}
+
+impl std::hash::Hash for GraphicsPipeline {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.inner).hash(state);
+    }
+}
+
+impl Default for GraphicsPipeline {
+    fn default() -> Self {
+        GraphicsPipeline::none()
+    }
+}
 
 impl GraphicsPipeline {
-    pub fn destroy(&mut self, device: &Device) {
-        let slot = device.inner().graphics_pipelines.remove(self.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUGraphicsPipeline(device.raw(), slot.inner);
-        }
-        self.0 = -1;
+    pub fn none() -> GraphicsPipeline {
+        NONE_GRAPHICS_PIPELINE.with(|s| s.clone())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.inner.0.is_null()
+    }
+
+    pub fn raw(&self) -> *mut gpu::SDL_GPUGraphicsPipeline {
+        self.inner.0
     }
 }
 
@@ -1691,7 +1743,7 @@ impl RenderPass<'_> {
         unsafe {
             gpu::SDL_BindGPUGraphicsPipeline(
                 self.inner,
-                self.device.inner().graphics_pipelines.with(pipeline.0, |slot| slot.inner),
+                pipeline.raw(),
             );
         }
     }
@@ -2041,9 +2093,6 @@ impl Drop for Device {
             }
             di.buffers.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUBuffer(r, slot.inner);
-            });
-            di.graphics_pipelines.for_each(|_, slot| {
-                gpu::SDL_ReleaseGPUGraphicsPipeline(r, slot.inner);
             });
             di.compute_pipelines.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUComputePipeline(r, slot.inner);

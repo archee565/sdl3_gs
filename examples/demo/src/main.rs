@@ -245,7 +245,7 @@ impl Renderer {
         target.cycle_resolve_texture = true;
 
         let pass = cmd.begin_render_pass(&[target], None)?;
-        pass.bind_graphics_pipeline(self.pipeline);
+        pass.bind_graphics_pipeline(self.pipeline.clone());
         pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: self.vertex_buffer, offset: 0 }]);
         pass.bind_index_buffer(&GPUBufferBinding { buffer: self.index_buffer, offset: 0 }, SDL_GPUIndexElementSize::_16BIT);
         pass.bind_fragment_samplers(0, &[TextureSamplerBinding {
@@ -316,7 +316,6 @@ fn run_compute_fill(device: &Device) {
     }
 
     buffer.destroy(device);
-    pipeline.destroy(device);
 }
 
 struct DemoApp {
