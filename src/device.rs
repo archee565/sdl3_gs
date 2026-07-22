@@ -33,6 +33,7 @@ pub use gpu::SDL_GPUColorTargetDescription;
 pub use gpu::SDL_GPUTextureFormat;
 pub use gpu::SDL_GPUBufferUsageFlags;
 pub use gpu::SDL_GPUIndexElementSize;
+pub use gpu::SDL_GPUTransferBufferUsage;
 pub use gpu::SDL_GPUFilter;
 pub use gpu::SDL_GPUSamplerAddressMode;
 pub use gpu::SDL_GPUSamplerMipmapMode;
@@ -109,6 +110,16 @@ impl ColorTargetInfo {
 
     #[allow(deprecated)]
     pub(crate) fn to_raw(&self, _device: &Device) -> gpu::SDL_GPUColorTargetInfo {
+        assert!(
+            self.texture.inner.kind.get() != TextureKind::None,
+            "cannot use a consumed swapchain texture as a color target"
+        );
+        if let Some(ref rt) = self.resolve_texture {
+            assert!(
+                rt.inner.kind.get() != TextureKind::None,
+                "cannot use a consumed swapchain texture as a resolve target"
+            );
+        }
         gpu::SDL_GPUColorTargetInfo {
             texture: self.texture.raw(),
             mip_level: self.mip_level,
@@ -170,6 +181,10 @@ impl DepthStencilTargetInfo {
     }
 
     pub(crate) fn to_raw(&self, _device: &Device) -> gpu::SDL_GPUDepthStencilTargetInfo {
+        assert!(
+            self.texture.inner.kind.get() != TextureKind::None,
+            "cannot use a consumed swapchain texture as a depth-stencil target"
+        );
         gpu::SDL_GPUDepthStencilTargetInfo {
             texture: self.texture.raw(),
             clear_depth: self.clear_depth,
@@ -344,38 +359,205 @@ pub struct ShaderCreateInfo<'a> {
 
 struct DeviceInner {
     raw: *mut gpu::SDL_GPUDevice,
-    upload_transfer_buffer: Cell<(*mut gpu::SDL_GPUTransferBuffer, u32)>,
+    upload_transfer_buffer: RefCell<Option<GPUTransferBuffer>>,
     cmd_buf_count: AtomicU32,
-    pending_transfer_buffers: RefCell<Vec<*mut gpu::SDL_GPUTransferBuffer>>,
+    pending_transfer_buffers: RefCell<Vec<GPUTransferBuffer>>,
+    window: Option<Rc<crate::window::Window>>,
 }
 
 pub struct Device
 {
-    window: Option<Rc<crate::window::Window>>,
-    inner: Rc<RefCell<DeviceInner>>,
+    inner: Rc<DeviceInner>,
 }
 
 impl Clone for Device {
     fn clone(&self) -> Self {
         Self {
-            window: self.window.clone(),
             inner: Rc::clone(&self.inner),
         }
     }
 }
 
 impl Device {
-    fn inner(&self) -> std::cell::Ref<'_, DeviceInner> {
-        self.inner.borrow()
+    /// Update a GPU buffer with new data, (re)creating it if invalid or too small.
+    pub fn update_buffer(
+        &self,
+        buffer: &mut GPUBuffer,
+        copy_pass: Option<&CopyPass>,
+        usage: SDL_GPUBufferUsageFlags,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let size = data.len() as u32;
+        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
+        if needs_recreate {
+            *buffer = self.create_buffer_sub(usage, size)?;
+        }
+        buffer.upload(copy_pass, 0, data)
+    }
+
+    /// Ensure a buffer exists and is at least `size` bytes, (re)creating it if needed.
+    pub fn ensure_buffer_size(
+        &self,
+        buffer: &mut GPUBuffer,
+        usage: SDL_GPUBufferUsageFlags,
+        size: u32,
+    ) -> Result<(), String> {
+        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
+        if needs_recreate {
+            *buffer = self.create_buffer_sub(usage, size)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_swapchain_texture_format(&self) -> SDL_GPUTextureFormat {
+        let window = self.inner.window.as_ref().expect("Device has no window");
+        unsafe { gpu::SDL_GetGPUSwapchainTextureFormat(        self.raw(), window.raw()) }
+    }
+
+    pub fn get_shader_formats(&self) -> SDL_GPUShaderFormat {
+        unsafe { gpu::SDL_GetGPUShaderFormats(        self.raw()) }
+    }
+
+    /// Create a GPU transfer buffer for upload/download staging.
+    pub fn create_transfer_buffer(
+        &self,
+        usage: gpu::SDL_GPUTransferBufferUsage,
+        size: u32,
+    ) -> Result<GPUTransferBuffer, String> {
+        let tb_info = gpu::SDL_GPUTransferBufferCreateInfo {
+            usage,
+            size,
+            props: sys::properties::SDL_PropertiesID(0),
+        };
+        unsafe {
+            let raw = gpu::SDL_CreateGPUTransferBuffer(self.raw(), &tb_info);
+            if raw.is_null() {
+                return Err(sdl_fail("SDL_CreateGPUTransferBuffer"));
+            }
+            Ok(GPUTransferBuffer {
+                inner: Rc::new(TransferBufferData {
+                    raw, size, device: Rc::downgrade(&self.inner),
+                }),
+            })
+        }
+    }
+
+    pub fn get_driver_name(&self) -> String
+    {
+        unsafe
+        {
+            std::ffi::CStr::from_ptr(sys::gpu::SDL_GetGPUDeviceDriver(        self.raw())).to_string_lossy().to_string()
+        }
+    }
+
+    /// Get the device properties for this device
+    pub fn get_device_properties(&self) -> crate::properties::Properties {
+        unsafe
+        {
+            crate::properties::Properties::from_raw(sys::gpu::SDL_GetGPUDeviceProperties(        self.raw()))
+        }
+    }
+
+
+    pub fn acquire_command_buffer(&self) -> Result<CommandBuffer, String> {
+        unsafe {
+            let raw = gpu::SDL_AcquireGPUCommandBuffer(        self.raw());
+            if raw.is_null() {
+                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
+            }
+            self.inner().cmd_buf_count.fetch_add(1, Ordering::Relaxed);
+            Ok(CommandBuffer { inner: raw, device: self.clone(), submitted: false, pass_active: Cell::new(false), swapchain_texture: RefCell::new(None) })
+        }
+    }
+
+    /// Called when a command buffer is submitted or cancelled.
+    /// When no command buffers remain in flight, releases all deferred transfer buffers.
+    fn on_command_buffer_done(&self) {
+        let di = self.inner();
+        let prev = di.cmd_buf_count.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(prev > 0, "command buffer count underflow");
+        if prev == 1 {
+            di.pending_transfer_buffers.borrow_mut().clear();
+        }
+    }
+
+    pub fn wait_for_swapchain(&self) -> Result<(), String> {
+        let window = self.inner.window.as_ref()
+            .ok_or_else(|| String::from("Device has no window"))?;
+        unsafe {
+            if !gpu::SDL_WaitForGPUSwapchain(        self.raw(), window.raw()) {
+                return Err(sdl_fail("SDL_WaitForGPUSwapchain"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Wait for a single fence.
+    fn wait_for_fence(&self, fence: &Fence) -> Result<(), String> {
+        if !fence.is_valid() { return Err( String::from("Invalid fence"));  }
+        unsafe {
+            if !gpu::SDL_WaitForGPUFences(        self.raw(), true, &fence.inner.raw, 1) {
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Query a fence (non-blocking).
+    pub fn query_fence(&self, fence: &Fence) -> bool {
+        assert!(fence.is_valid());
+        unsafe {
+            gpu::SDL_QueryGPUFence(        self.raw(), fence.inner.raw)
+        }
+    }
+
+    /// Wait for a fence and then release it.
+    pub fn wait_for_fence_then_release(&self, fence: Fence) -> Result<(), String> {
+        self.wait_for_fence(&fence)?;
+        drop(fence);
+        Ok(())
+    }
+
+    /// Wait for multiple fences. If `wait_all` is true, waits for all fences;
+    /// otherwise waits for any one fence.
+    pub fn wait_for_fences(&self, fences: &[Fence], wait_all: bool) -> Result<(), String> {
+        if fences.is_empty() {
+            return Ok(());
+        }
+        let mut ptrs: Vec<*mut gpu::SDL_GPUFence> = Vec::with_capacity(fences.len());
+        for f in fences {
+            ptrs.push(f.inner.raw);
+        }
+        unsafe {
+            if !gpu::SDL_WaitForGPUFences(        self.raw(), wait_all, ptrs.as_ptr(), ptrs.len() as u32) {
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Block until all GPU work is complete. Equivalent to SDL_WaitForGPUIdle.
+    /// Expensive — use only for debugging synchronization issues.
+    pub fn wait_idle(&self) -> Result<(), String> {
+        unsafe {
+            if !gpu::SDL_WaitForGPUIdle(        self.raw()) {
+                return Err(sdl_fail("SDL_WaitForGPUIdle"));
+            }
+        }
+        Ok(())
+    }
+
+    fn inner(&self) -> &DeviceInner {
+        &self.inner
     }
 
     pub(crate) fn raw(&self) -> *mut gpu::SDL_GPUDevice {
-        self.inner.borrow().raw
+        self.inner.raw
     }
 
     pub fn get_window(&self) -> Option<&crate::window::Window>
     {
-        self.window.as_deref()
+        self.inner.window.as_deref()
     }
 
     pub fn new(format : gpu::SDL_GPUShaderFormat, window : Option<crate::window::Window>, properties : Option<sys::properties::SDL_PropertiesID>) -> Result<Self,String>
@@ -410,15 +592,15 @@ impl Device {
                 gpu::SDL_ClaimWindowForGPUDevice(sys_device,window.raw());
             }
             
-            let window = window.map(Rc::new);
             let inner = DeviceInner {
                 raw: sys_device,
-                upload_transfer_buffer: Cell::new((std::ptr::null_mut(), 0)),
+                window: window.map(Rc::new),
+                upload_transfer_buffer: RefCell::new(None),
                 cmd_buf_count: AtomicU32::new(0),
                 pending_transfer_buffers: RefCell::new(Vec::new()),
             };
-            let inner_rc = Rc::new(RefCell::new(inner));
-            Ok(Device { window, inner: inner_rc })
+            let inner_rc = Rc::new(inner);
+            Ok(Device { inner: inner_rc })
         }
         
     }
@@ -426,7 +608,7 @@ impl Device {
     /// Release the window from the GPU device. Must be called on Android
     /// when the app enters the background (`SDL_EVENT_DID_ENTER_BACKGROUND`).
     pub fn release_window(&self) {
-        if let Some(window) = &self.window {
+        if let Some(window) = &self.inner.window {
             unsafe { gpu::SDL_ReleaseWindowFromGPUDevice(        self.raw(), window.raw()); }
         }
     }
@@ -434,7 +616,7 @@ impl Device {
     /// Claim the window for the GPU device. Must be called on Android
     /// when the app enters the foreground (`SDL_EVENT_WILL_ENTER_FOREGROUND`).
     pub fn claim_window(&self) {
-        if let Some(window) = &self.window {
+        if let Some(window) = &self.inner.window {
             unsafe { gpu::SDL_ClaimWindowForGPUDevice(        self.raw(), window.raw()); }
         }
     }
@@ -446,7 +628,7 @@ impl Device {
         swapchain_composition: gpu::SDL_GPUSwapchainComposition,
         present_mode: gpu::SDL_GPUPresentMode,
     ) -> bool {
-        if let Some(window) = &self.window {
+        if let Some(window) = &self.inner.window {
             unsafe {
                 gpu::SDL_SetGPUSwapchainParameters(        self.raw(), window.raw(), swapchain_composition, present_mode)
             }
@@ -476,12 +658,12 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUTexture"));
             }
             Ok(Texture {
-                inner: Rc::new(RefCell::new(TextureData {
+                inner: Rc::new(TextureData {
                     raw,
                     res: (info.width, info.height),
                     device: Rc::downgrade(&self.inner),
-                    kind: TextureKind::Regular,
-                })),
+                    kind: Cell::new(TextureKind::Regular),
+                }),
             })
         }
     }
@@ -508,14 +690,14 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUShader"));
             }
             Ok(Shader {
-                inner: Rc::new(RefCell::new(ShaderData { raw, device: Rc::downgrade(&self.inner) })),
+                inner: Rc::new(ShaderData { raw, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
 
 
     #[allow(deprecated)]
-    pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo) -> Result<GraphicsPipeline, String> {
+    pub fn create_graphics_pipeline(&self, info: &GraphicsPipelineCreateInfo<'_>) -> Result<GraphicsPipeline, String> {
         validate_sample_count(info.multisample_state.sample_count)?;
         let vertex_shader_raw = info.vertex_shader.raw();
         let fragment_shader_raw = info.fragment_shader.raw();
@@ -638,14 +820,15 @@ impl Device {
 
 impl DeviceInner {
     /// Ensure the internal upload transfer buffer is at least `size` bytes.
-    fn ensure_upload_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
-        let (current, current_size) = self.upload_transfer_buffer.get();
-        if !current.is_null() && current_size >= size {
-            return Ok(current);
+    fn ensure_upload_transfer_buffer(&self, size: u32, device_weak: &Weak<DeviceInner>) -> Result<GPUTransferBuffer, String> {
+        if let Some(ref cached) = *self.upload_transfer_buffer.borrow() {
+            if cached.size() >= size {
+                return Ok(cached.clone());
+            }
         }
         // Defer release of the old buffer until no command buffers are in flight.
-        if !current.is_null() {
-            self.pending_transfer_buffers.borrow_mut().push(current);
+        if let Some(old) = self.upload_transfer_buffer.borrow_mut().take() {
+            self.pending_transfer_buffers.borrow_mut().push(old);
         }
         let tb_info = gpu::SDL_GPUTransferBufferCreateInfo {
             usage: gpu::SDL_GPUTransferBufferUsage::UPLOAD,
@@ -655,24 +838,24 @@ impl DeviceInner {
         unsafe {
             let raw = gpu::SDL_CreateGPUTransferBuffer(self.raw, &tb_info);
             if raw.is_null() {
-                self.upload_transfer_buffer.set((std::ptr::null_mut(), 0));
+                *self.upload_transfer_buffer.borrow_mut() = None;
                 return Err(sdl_fail("SDL_CreateGPUTransferBuffer"));
             }
-            self.upload_transfer_buffer.set((raw, size));
-            Ok(raw)
+            let tb = GPUTransferBuffer {
+                inner: Rc::new(TransferBufferData {
+                    raw, size, device: device_weak.clone(),
+                }),
+            };
+            *self.upload_transfer_buffer.borrow_mut() = Some(tb.clone());
+            Ok(tb)
         }
     }
 
     /// Stage upload data into the internal transfer buffer (map, copy, unmap).
-    /// Returns the transfer buffer handle.
-    fn stage_upload(&self, data: &[u8]) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
-        let transfer = self.ensure_upload_transfer_buffer(data.len() as u32)?;
-        unsafe {
-            let ptr = gpu::SDL_MapGPUTransferBuffer(self.raw, transfer, true);
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-            gpu::SDL_UnmapGPUTransferBuffer(self.raw, transfer);
-        }
-        Ok(transfer)
+    fn stage_upload(&self, data: &[u8], device_weak: &Weak<DeviceInner>) -> Result<GPUTransferBuffer, String> {
+        let tb = self.ensure_upload_transfer_buffer(data.len() as u32, device_weak)?;
+        tb.write(data)?;
+        Ok(tb)
     }
 
     /// Run a closure on a copy pass. Uses the provided pass, or creates a
@@ -706,170 +889,26 @@ impl DeviceInner {
     }
 
     /// Create a download transfer buffer of the given size.
-    fn create_download_transfer_buffer(&self, size: u32) -> Result<*mut gpu::SDL_GPUTransferBuffer, String> {
+    fn create_download_transfer_buffer(&self, size: u32, device_weak: &Weak<DeviceInner>) -> Result<GPUTransferBuffer, String> {
         let tb_info = gpu::SDL_GPUTransferBufferCreateInfo {
             usage: gpu::SDL_GPUTransferBufferUsage::DOWNLOAD,
             size,
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
-            let transfer = gpu::SDL_CreateGPUTransferBuffer(self.raw, &tb_info);
-            if transfer.is_null() {
+            let raw = gpu::SDL_CreateGPUTransferBuffer(self.raw, &tb_info);
+            if raw.is_null() {
                 return Err(sdl_fail("SDL_CreateGPUTransferBuffer (download)"));
             }
-            Ok(transfer)
+            Ok(GPUTransferBuffer {
+                inner: Rc::new(TransferBufferData {
+                    raw, size, device: device_weak.clone(),
+                }),
+            })
         }
     }
 }
 
-impl Device {
-    /// Update a GPU buffer with new data, (re)creating it if invalid or too small.
-    pub fn update_buffer(
-        &self,
-        buffer: &mut GPUBuffer,
-        copy_pass: Option<&CopyPass>,
-        usage: SDL_GPUBufferUsageFlags,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let size = data.len() as u32;
-        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
-        if needs_recreate {
-            *buffer = self.create_buffer_sub(usage, size)?;
-        }
-        buffer.upload(copy_pass, 0, data)
-    }
-
-    /// Ensure a buffer exists and is at least `size` bytes, (re)creating it if needed.
-    pub fn ensure_buffer_size(
-        &self,
-        buffer: &mut GPUBuffer,
-        usage: SDL_GPUBufferUsageFlags,
-        size: u32,
-    ) -> Result<(), String> {
-        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
-        if needs_recreate {
-            *buffer = self.create_buffer_sub(usage, size)?;
-        }
-        Ok(())
-    }
-
-    pub fn get_swapchain_texture_format(&self) -> SDL_GPUTextureFormat {
-        let window = self.window.as_ref().expect("Device has no window");
-        unsafe { gpu::SDL_GetGPUSwapchainTextureFormat(        self.raw(), window.raw()) }
-    }
-
-    pub fn get_shader_formats(&self) -> SDL_GPUShaderFormat {
-        unsafe { gpu::SDL_GetGPUShaderFormats(        self.raw()) }
-    }
-
-    pub fn get_driver_name(&self) -> String
-    {
-        unsafe
-        {
-            std::ffi::CStr::from_ptr(sys::gpu::SDL_GetGPUDeviceDriver(        self.raw())).to_string_lossy().to_string()
-        }
-    }
-
-    /// Get the device properties for this device
-    pub fn get_device_properties(&self) -> crate::properties::Properties {
-        unsafe
-        {
-            crate::properties::Properties::from_raw(sys::gpu::SDL_GetGPUDeviceProperties(        self.raw()))
-        }
-    }
-
-
-    pub fn acquire_command_buffer(&self) -> Result<CommandBuffer, String> {
-        unsafe {
-            let raw = gpu::SDL_AcquireGPUCommandBuffer(        self.raw());
-            if raw.is_null() {
-                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
-            }
-            self.inner().cmd_buf_count.fetch_add(1, Ordering::Relaxed);
-            Ok(CommandBuffer { inner: raw, device: self.clone(), submitted: false, pass_active: Cell::new(false), swapchain_texture: RefCell::new(None) })
-        }
-    }
-
-    /// Called when a command buffer is submitted or cancelled.
-    /// When no command buffers remain in flight, releases all deferred transfer buffers.
-    fn on_command_buffer_done(&self) {
-        let di = self.inner();
-        let prev = di.cmd_buf_count.fetch_sub(1, Ordering::Relaxed);
-        debug_assert!(prev > 0, "command buffer count underflow");
-        if prev == 1 {
-            let mut pending = di.pending_transfer_buffers.borrow_mut();
-            for tb in pending.drain(..) {
-                unsafe { gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), tb); }
-            }
-        }
-    }
-
-    pub fn wait_for_swapchain(&self) -> Result<(), String> {
-        let window = self.window.as_ref()
-            .ok_or_else(|| String::from("Device has no window"))?;
-        unsafe {
-            if !gpu::SDL_WaitForGPUSwapchain(        self.raw(), window.raw()) {
-                return Err(sdl_fail("SDL_WaitForGPUSwapchain"));
-            }
-        }
-        Ok(())
-    }
-
-    /// Wait for a single fence.
-    fn wait_for_fence(&self, fence: &Fence) -> Result<(), String> {
-        if !fence.is_valid() { return Err( String::from("Invalid fence"));  }
-        unsafe {
-            if !gpu::SDL_WaitForGPUFences(        self.raw(), true, &fence.inner.raw, 1) {
-                return Err(sdl_fail("SDL_WaitForGPUFences"));
-            }
-        }
-        Ok(())
-    }
-
-    /// Query a fence (non-blocking).
-    pub fn query_fence(&self, fence: &Fence) -> bool {
-        assert!(fence.is_valid());
-        unsafe {
-            gpu::SDL_QueryGPUFence(        self.raw(), fence.inner.raw)
-        }
-    }
-
-    /// Wait for a fence and then release it.
-    pub fn wait_for_fence_then_release(&self, fence: Fence) -> Result<(), String> {
-        self.wait_for_fence(&fence)?;
-        drop(fence);
-        Ok(())
-    }
-
-    /// Wait for multiple fences. If `wait_all` is true, waits for all fences;
-    /// otherwise waits for any one fence.
-    pub fn wait_for_fences(&self, fences: &[Fence], wait_all: bool) -> Result<(), String> {
-        if fences.is_empty() {
-            return Ok(());
-        }
-        let mut ptrs: Vec<*mut gpu::SDL_GPUFence> = Vec::with_capacity(fences.len());
-        for f in fences {
-            ptrs.push(f.inner.raw);
-        }
-        unsafe {
-            if !gpu::SDL_WaitForGPUFences(        self.raw(), wait_all, ptrs.as_ptr(), ptrs.len() as u32) {
-                return Err(sdl_fail("SDL_WaitForGPUFences"));
-            }
-        }
-        Ok(())
-    }
-
-    /// Block until all GPU work is complete. Equivalent to SDL_WaitForGPUIdle.
-    /// Expensive — use only for debugging synchronization issues.
-    pub fn wait_idle(&self) -> Result<(), String> {
-        unsafe {
-            if !gpu::SDL_WaitForGPUIdle(        self.raw()) {
-                return Err(sdl_fail("SDL_WaitForGPUIdle"));
-            }
-        }
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextureKind { Regular, Swapchain, None }
@@ -877,18 +916,18 @@ pub(crate) enum TextureKind { Regular, Swapchain, None }
 pub(crate) struct TextureData {
     pub(crate) raw: *mut gpu::SDL_GPUTexture,
     pub(crate) res: (u32, u32),
-    device: Weak<RefCell<DeviceInner>>,
-    pub(crate) kind: TextureKind,
+    device: Weak<DeviceInner>,
+    pub(crate) kind: Cell<TextureKind>,
 }
 
 impl Drop for TextureData {
     fn drop(&mut self) {
-        if self.kind == TextureKind::Swapchain || self.raw.is_null() {
+        if self.kind.get() != TextureKind::Regular {
             return;
         }
         match self.device.upgrade() {
             Some(di) => unsafe {
-                gpu::SDL_ReleaseGPUTexture(di.borrow().raw, self.raw);
+                gpu::SDL_ReleaseGPUTexture(di.raw, self.raw);
             },
             None => {
                 #[cfg(feature = "verbose")]
@@ -900,7 +939,7 @@ impl Drop for TextureData {
 
 pub(crate) struct ShaderData {
     pub(crate) raw: *mut gpu::SDL_GPUShader,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for ShaderData {
@@ -909,7 +948,6 @@ impl Drop for ShaderData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUShader(di.raw, self.raw);
             }
@@ -921,7 +959,7 @@ impl Drop for ShaderData {
 
 pub(crate) struct GraphicsPipelineData {
     pub(crate) raw: *mut gpu::SDL_GPUGraphicsPipeline,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for GraphicsPipelineData {
@@ -930,7 +968,6 @@ impl Drop for GraphicsPipelineData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUGraphicsPipeline(di.raw, self.raw);
             }
@@ -942,7 +979,7 @@ impl Drop for GraphicsPipelineData {
 
 pub(crate) struct ComputePipelineData {
     pub(crate) raw: *mut gpu::SDL_GPUComputePipeline,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for ComputePipelineData {
@@ -951,7 +988,6 @@ impl Drop for ComputePipelineData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUComputePipeline(di.raw, self.raw);
             }
@@ -964,7 +1000,7 @@ impl Drop for ComputePipelineData {
 pub(crate) struct GPUBufferData {
     pub(crate) raw: *mut gpu::SDL_GPUBuffer,
     pub(crate) size: u32,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for GPUBufferData {
@@ -973,7 +1009,6 @@ impl Drop for GPUBufferData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUBuffer(di.raw, self.raw);
             }
@@ -985,7 +1020,7 @@ impl Drop for GPUBufferData {
 
 pub(crate) struct SamplerData {
     pub(crate) raw: *mut gpu::SDL_GPUSampler,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for SamplerData {
@@ -994,7 +1029,6 @@ impl Drop for SamplerData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUSampler(di.raw, self.raw);
             }
@@ -1006,7 +1040,7 @@ impl Drop for SamplerData {
 
 pub(crate) struct FenceData {
     pub(crate) raw: *mut gpu::SDL_GPUFence,
-    device: Weak<RefCell<DeviceInner>>,
+    device: Weak<DeviceInner>,
 }
 
 impl Drop for FenceData {
@@ -1015,7 +1049,6 @@ impl Drop for FenceData {
             return;
         }
         if let Some(di) = self.device.upgrade() {
-            let di = di.borrow();
             unsafe {
                 gpu::SDL_ReleaseGPUFence(di.raw, self.raw);
             }
@@ -1028,15 +1061,14 @@ impl Drop for FenceData {
 /// A GPU texture that is automatically released when dropped.
 #[derive(Clone)]
 pub struct Texture {
-    pub(crate) inner: Rc<RefCell<TextureData>>,
+    pub(crate) inner: Rc<TextureData>,
 }
 
 impl std::fmt::Debug for Texture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let td = self.inner.borrow();
         f.debug_struct("Texture")
-            .field("raw", &(td.raw as usize))
-            .field("res", &td.res)
+            .field("raw", &(self.inner.raw as usize))
+            .field("res", &self.inner.res)
             .finish()
     }
 }
@@ -1044,19 +1076,18 @@ impl std::fmt::Debug for Texture {
 impl Texture {
     /// Upload data to the full texture. Uses the internal Weak ref for device access.
     pub fn upload(&self, data: &[u8]) -> Result<(), String> {
-        let td = self.inner.borrow();
-        let di = td.device.upgrade().ok_or("Texture::upload: device dropped")?;
-        let di = di.borrow();
-        let res = td.res;
-        let transfer = di.stage_upload(data)?;
+        let weak = self.inner.device.clone();
+        let di = weak.upgrade().ok_or("Texture::upload: device dropped")?;
+        let res = self.inner.res;
+        let transfer = di.stage_upload(data, &weak)?;
         let src = gpu::SDL_GPUTextureTransferInfo {
-            transfer_buffer: transfer,
+            transfer_buffer: transfer.raw(),
             offset: 0,
             pixels_per_row: 0,
             rows_per_layer: 0,
         };
         let dst = gpu::SDL_GPUTextureRegion {
-            texture: td.raw,
+            texture: self.inner.raw,
             mip_level: 0,
             layer: 0,
             x: 0,
@@ -1078,12 +1109,11 @@ impl Texture {
         region: &TextureRegion,
         data: &[u8],
     ) -> Result<(), String> {
-        let td = self.inner.borrow();
-        let di = td.device.upgrade().ok_or("Texture::upload_region: device dropped")?;
-        let di = di.borrow();
-        let transfer = di.stage_upload(data)?;
+        let weak = self.inner.device.clone();
+        let di = weak.upgrade().ok_or("Texture::upload_region: device dropped")?;
+        let transfer = di.stage_upload(data, &weak)?;
         let src = gpu::SDL_GPUTextureTransferInfo {
-            transfer_buffer: transfer,
+            transfer_buffer: transfer.raw(),
             offset: 0,
             pixels_per_row: 0,
             rows_per_layer: 0,
@@ -1105,43 +1135,42 @@ impl Default for Texture
 impl Texture {
     pub fn none() -> Texture {
         Texture {
-            inner: Rc::new(RefCell::new(TextureData {
-                raw: std::ptr::null_mut(), res: (0, 0), device: Weak::new(), kind: TextureKind::None,
-            })),
+            inner: Rc::new(TextureData {
+                raw: std::ptr::null_mut(), res: (0, 0), device: Weak::new(), kind: Cell::new(TextureKind::None),
+            }),
         }
     }
 
     pub fn is_valid(&self) -> bool
     {
-        !self.inner.borrow().raw.is_null()
+        self.inner.kind.get() != TextureKind::None
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUTexture {
-        self.inner.borrow().raw
+        self.inner.raw
     }
 
     pub fn res(&self) -> (u32, u32) {
-        self.inner.borrow().res
+        self.inner.res
     }
 }
 
 thread_local! {
     static NONE_SHADER: Shader = Shader {
-        inner: Rc::new(RefCell::new(ShaderData { raw: std::ptr::null_mut(), device: Weak::new() })),
+        inner: Rc::new(ShaderData { raw: std::ptr::null_mut(), device: Weak::new() }),
     };
 }
 
 /// A GPU shader that is automatically released when dropped.
 #[derive(Clone)]
 pub struct Shader {
-    pub(crate) inner: Rc<RefCell<ShaderData>>,
+    pub(crate) inner: Rc<ShaderData>,
 }
 
 impl std::fmt::Debug for Shader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sd = self.inner.borrow();
         f.debug_struct("Shader")
-            .field("raw", &(sd.raw as usize))
+            .field("raw", &(self.inner.raw as usize))
             .finish()
     }
 }
@@ -1172,11 +1201,11 @@ impl Shader {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.borrow().raw.is_null()
+        !self.inner.raw.is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUShader {
-        self.inner.borrow().raw
+        self.inner.raw
     }
 }
 
@@ -1354,10 +1383,10 @@ impl GPUBuffer {
         if offset.saturating_add(data_size) > buf_size {
             return Err("data exceeds buffer size".into());
         }
-        let di = self.inner.device.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
-        let di = di.borrow();
-        let transfer = di.stage_upload(data)?;
-        let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
+        let weak = self.inner.device.clone();
+        let di = weak.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
+        let transfer = di.stage_upload(data, &weak)?;
+        let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer.raw(), offset: 0 };
         let dst = gpu::SDL_GPUBufferRegion { buffer: self.raw(), offset, size: data_size };
         di.with_copy_pass(copy_pass, |pass| unsafe {
             gpu::SDL_UploadToGPUBuffer(pass, &src, &dst, true);
@@ -1370,51 +1399,36 @@ impl GPUBuffer {
         if offset.saturating_add(size) > buf_size {
             return Err("requested range exceeds buffer size".into());
         }
-        let di = self.inner.device.upgrade().ok_or("GPUBuffer::download_raw: device dropped")?;
-        let di = di.borrow();
-        let transfer = di.create_download_transfer_buffer(size)?;
+        let weak = self.inner.device.clone();
+        let di = weak.upgrade().ok_or("GPUBuffer::download_raw: device dropped")?;
+        let transfer = di.create_download_transfer_buffer(size, &weak)?;
         unsafe {
             let cmd = gpu::SDL_AcquireGPUCommandBuffer(di.raw);
             if cmd.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
                 return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
             }
             let pass = gpu::SDL_BeginGPUCopyPass(cmd);
             if pass.is_null() {
                 gpu::SDL_CancelGPUCommandBuffer(cmd);
-                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
                 return Err(sdl_fail("SDL_BeginGPUCopyPass"));
             }
 
             let src = gpu::SDL_GPUBufferRegion { buffer: self.raw(), offset, size };
-            let dst = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
+            let dst = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer.raw(), offset: 0 };
             gpu::SDL_DownloadFromGPUBuffer(pass, &src, &dst);
             gpu::SDL_EndGPUCopyPass(pass);
 
             let fence = gpu::SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
             if fence.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
                 return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
             }
             if !gpu::SDL_WaitForGPUFences(di.raw, true, &fence, 1) {
                 gpu::SDL_ReleaseGPUFence(di.raw, fence);
-                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
                 return Err(sdl_fail("SDL_WaitForGPUFences"));
             }
             gpu::SDL_ReleaseGPUFence(di.raw, fence);
-
-            let ptr = gpu::SDL_MapGPUTransferBuffer(di.raw, transfer, false);
-            if ptr.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
-                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
-            }
-            let mut data = vec![0u8; size as usize];
-            std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size as usize);
-            gpu::SDL_UnmapGPUTransferBuffer(di.raw, transfer);
-            gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
-
-            Ok(data)
         }
+        transfer.read()
     }
 
     pub fn download<T: bytemuck::Pod>(&self, offset: u32, dst: &mut T) -> Result<(), String> {
@@ -1493,15 +1507,15 @@ pub struct GPUBufferBinding<'a> {
 }
 
 
-pub struct GraphicsPipelineCreateInfo {
+pub struct GraphicsPipelineCreateInfo<'a> {
     /// The vertex shader used by the graphics pipeline.
     pub vertex_shader: Shader,
     /// The fragment shader used by the graphics pipeline.
     pub fragment_shader: Shader,
     /// Vertex attribute descriptions.
-    pub vertex_attributes: Vec<SDL_GPUVertexAttribute>,
+    pub vertex_attributes: &'a [SDL_GPUVertexAttribute],
     /// Vertex buffer descriptions.
-    pub vertex_buffer_descriptions: Vec<SDL_GPUVertexBufferDescription>,
+    pub vertex_buffer_descriptions: &'a [SDL_GPUVertexBufferDescription],
     /// The primitive topology of the graphics pipeline.
     pub primitive_type: SDL_GPUPrimitiveType,
     /// The rasterizer state of the graphics pipeline.
@@ -1511,7 +1525,7 @@ pub struct GraphicsPipelineCreateInfo {
     /// The depth-stencil state of the graphics pipeline.
     pub depth_stencil_state: SDL_GPUDepthStencilState,
     /// Color target descriptions.
-    pub color_target_descriptions: Vec<SDL_GPUColorTargetDescription>,
+    pub color_target_descriptions: &'a [SDL_GPUColorTargetDescription],
     /// The pixel format of the depth-stencil target. Ignored if has_depth_stencil_target is false.
     pub depth_stencil_format: SDL_GPUTextureFormat,
     /// Whether the pipeline uses a depth-stencil target.
@@ -1579,7 +1593,7 @@ impl CommandBuffer {
     pub fn acquire_swapchain_texture(
         &self,
     ) -> Result<Option<Texture>, String> {
-        let window = self.device.window.as_ref()
+        let window = self.device.inner.window.as_ref()
             .ok_or_else(|| String::from("Device has no window"))?;
 
         let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
@@ -1600,9 +1614,9 @@ impl CommandBuffer {
         }
 
         let sc = Texture {
-            inner: Rc::new(RefCell::new(TextureData {
-                raw: texture, res: (width, height), device: Weak::new(), kind: TextureKind::Swapchain,
-            })),
+            inner: Rc::new(TextureData {
+                raw: texture, res: (width, height), device: Weak::new(), kind: Cell::new(TextureKind::Swapchain),
+            }),
         };
         *self.swapchain_texture.borrow_mut() = Some(sc.clone());
         if texture.is_null() {
@@ -1615,7 +1629,7 @@ impl CommandBuffer {
     pub fn wait_and_acquire_swapchain_texture(
         &self,
     ) -> Result<Texture, String> {
-        let window = self.device.window.as_ref()
+        let window = self.device.inner.window.as_ref()
             .ok_or_else(|| String::from("Device has no window"))?;
 
         let mut texture: *mut gpu::SDL_GPUTexture = std::ptr::null_mut();
@@ -1636,9 +1650,9 @@ impl CommandBuffer {
         }
 
         let sc = Texture {
-            inner: Rc::new(RefCell::new(TextureData {
-                raw: texture, res: (width, height), device: Weak::new(), kind: TextureKind::Swapchain,
-            })),
+            inner: Rc::new(TextureData {
+                raw: texture, res: (width, height), device: Weak::new(), kind: Cell::new(TextureKind::Swapchain),
+            }),
         };
         *self.swapchain_texture.borrow_mut() = Some(sc.clone());
         Ok(sc)
@@ -2100,9 +2114,7 @@ impl Drop for ComputePass<'_> {
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
         if let Some(ref sc) = *self.swapchain_texture.borrow() {
-            let mut td = sc.inner.borrow_mut();
-            td.raw = std::ptr::null_mut();
-            td.res = (0, 0);
+            sc.inner.kind.set(TextureKind::None);
         }
         if !self.submitted {
             unsafe {
@@ -2149,22 +2161,114 @@ impl Fence {
     }
 }
 
+pub(crate) struct TransferBufferData {
+    pub(crate) raw: *mut gpu::SDL_GPUTransferBuffer,
+    size: u32,
+    device: Weak<DeviceInner>,
+}
+
+impl Drop for TransferBufferData {
+    fn drop(&mut self) {
+        if self.raw.is_null() {
+            return;
+        }
+        if let Some(di) = self.device.upgrade() {
+            unsafe { gpu::SDL_ReleaseGPUTransferBuffer(di.raw, self.raw); }
+        }
+    }
+}
+
+thread_local! {
+    static NONE_TRANSFER_BUFFER: GPUTransferBuffer = GPUTransferBuffer {
+        inner: Rc::new(TransferBufferData {
+            raw: std::ptr::null_mut(), size: 0, device: Weak::new(),
+        }),
+    };
+}
+
+/// A GPU transfer buffer for upload/download staging. Automatically released on drop.
+#[derive(Clone)]
+pub struct GPUTransferBuffer {
+    pub(crate) inner: Rc<TransferBufferData>,
+}
+
+impl std::fmt::Debug for GPUTransferBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GPUTransferBuffer")
+            .field("raw", &(self.inner.raw as usize))
+            .field("size", &self.inner.size)
+            .finish()
+    }
+}
+
+impl Default for GPUTransferBuffer {
+    fn default() -> Self {
+        GPUTransferBuffer::none()
+    }
+}
+
+impl GPUTransferBuffer {
+    pub fn none() -> GPUTransferBuffer {
+        NONE_TRANSFER_BUFFER.with(|s| s.clone())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.inner.raw.is_null()
+    }
+
+    pub fn raw(&self) -> *mut gpu::SDL_GPUTransferBuffer {
+        self.inner.raw
+    }
+
+    pub fn size(&self) -> u32 {
+        self.inner.size
+    }
+
+    /// Map, write data, and unmap the transfer buffer.
+    pub fn write(&self, data: &[u8]) -> Result<(), String> {
+        let size = self.size();
+        if data.len() as u32 > size {
+            return Err("data exceeds transfer buffer size".into());
+        }
+        let di = self.inner.device.upgrade().ok_or("GPUTransferBuffer::write: device dropped")?;
+        unsafe {
+            let ptr = gpu::SDL_MapGPUTransferBuffer(di.raw, self.raw(), true);
+            if ptr.is_null() {
+                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
+            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+            gpu::SDL_UnmapGPUTransferBuffer(di.raw, self.raw());
+        }
+        Ok(())
+    }
+
+    /// Map, read, and unmap the transfer buffer.
+    pub fn read(&self) -> Result<Vec<u8>, String> {
+        let size = self.size();
+        let di = self.inner.device.upgrade().ok_or("GPUTransferBuffer::read: device dropped")?;
+        unsafe {
+            let ptr = gpu::SDL_MapGPUTransferBuffer(di.raw, self.raw(), false);
+            if ptr.is_null() {
+                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
+            }
+            let mut data = vec![0u8; size as usize];
+            std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size as usize);
+            gpu::SDL_UnmapGPUTransferBuffer(di.raw, self.raw());
+            Ok(data)
+        }
+    }
+}
+
 impl Drop for Device {
     fn drop(&mut self) {
         if Rc::strong_count(&self.inner) != 1 {
             return;
         }
-        let di = self.inner.borrow();
-        let r = di.raw;
+        let r = self.inner.raw;
         unsafe {
-            let (tb, _) = di.upload_transfer_buffer.get();
-            if !tb.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(r, tb);
-            }
-            for pending_tb in di.pending_transfer_buffers.borrow().iter() {
-                gpu::SDL_ReleaseGPUTransferBuffer(r, *pending_tb);
-            }
-            if let Some(window) = &self.window
+            *self.inner.upload_transfer_buffer.borrow_mut() = None;
+            self.inner.pending_transfer_buffers.borrow_mut().clear();
+            if let Some(window) = &self.inner.window
             {
                 gpu::SDL_ReleaseWindowFromGPUDevice(r, window.raw());
             }

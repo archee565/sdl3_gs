@@ -159,19 +159,6 @@ impl Properties {
         if ok { Ok(()) } else { Err(get_error()) }
     }
 
-    pub fn get_data(&self, name: &str) -> Option<&[u8]> {
-        let c_name = CString::new(name).unwrap();
-        let ptr = unsafe {
-            sys::properties::SDL_GetPointerProperty(self.id, c_name.as_ptr(), std::ptr::null_mut())
-        };
-        if ptr.is_null() {
-            None
-        } else {
-            let vec = unsafe { &*(ptr as *const Vec<u8>) };
-            Some(vec.as_slice())
-        }
-    }
-
     pub fn get_pointer(&self, name: &str) -> *mut std::ffi::c_void {
         let c_name = CString::new(name).unwrap();
         unsafe {

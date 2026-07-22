@@ -115,7 +115,7 @@ impl Renderer {
         let pipeline = device.create_graphics_pipeline(&GraphicsPipelineCreateInfo {
             vertex_shader,
             fragment_shader,
-            vertex_attributes: vec![
+            vertex_attributes: &[
                 SDL_GPUVertexAttribute {
                     location: 0,
                     buffer_slot: 0,
@@ -129,7 +129,7 @@ impl Renderer {
                     offset: (std::mem::size_of::<[f32; 2]>()) as u32,
                 },
             ],
-            vertex_buffer_descriptions: vec![
+            vertex_buffer_descriptions: &[
                 SDL_GPUVertexBufferDescription {
                     slot: 0,
                     pitch: std::mem::size_of::<Vertex>() as u32,
@@ -147,7 +147,7 @@ impl Renderer {
                 ..Default::default()
             },
             depth_stencil_state: Default::default(),
-            color_target_descriptions: vec![SDL_GPUColorTargetDescription {
+            color_target_descriptions: &[SDL_GPUColorTargetDescription {
                 format: swapchain_format,
                 blend_state: Default::default(),
             }],

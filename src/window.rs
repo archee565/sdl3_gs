@@ -14,13 +14,13 @@ pub struct DisplayMode {
 
 pub struct Window
 {
-    inner : *mut sys::video::SDL_Window,
+    raw : *mut sys::video::SDL_Window,
 }
 
 impl  Window {
     pub fn set_fullscreen(&self, fullscreen : bool)
     {
-        unsafe { sys::video::SDL_SetWindowFullscreen(self.inner, fullscreen); }
+        unsafe { sys::video::SDL_SetWindowFullscreen(self.raw, fullscreen); }
     }
 
     pub fn create(
@@ -59,19 +59,19 @@ impl  Window {
                 return Err(format!("SDL_CreateWindow failed: {}", error_msg));
             }
 
-            Ok(Window { inner: window_ptr })
+            Ok(Window { raw: window_ptr })
         }
     }
     
     pub fn set_position(&self, x: i32, y: i32) -> Result<(), &'static str> {
-        let ok = unsafe { video::SDL_SetWindowPosition(self.inner, x, y) };
+        let ok = unsafe { video::SDL_SetWindowPosition(self.raw, x, y) };
         if ok { Ok(()) } else { Err("SDL_SetWindowPosition failed") }
     }
 
     pub fn get_position(&self) -> Result<(i32, i32), &'static str> {
         let mut x: i32 = 0;
         let mut y: i32 = 0;
-        let ok = unsafe { video::SDL_GetWindowPosition(self.inner, &mut x, &mut y) };
+        let ok = unsafe { video::SDL_GetWindowPosition(self.raw, &mut x, &mut y) };
         if ok { Ok((x, y)) } else { Err("SDL_GetWindowPosition failed") }
     }
 
@@ -81,7 +81,7 @@ impl  Window {
 
     pub fn get_current_display_mode(&self) -> Result<DisplayMode, &'static str> {
         unsafe {
-            let display_id = video::SDL_GetDisplayForWindow(self.inner);
+            let display_id = video::SDL_GetDisplayForWindow(self.raw);
             if display_id == video::SDL_DisplayID(0) {
                 return Err("SDL_GetDisplayForWindow failed");
             }
@@ -100,7 +100,7 @@ impl  Window {
     }
 
     pub fn get_properties(&self) -> Result<Properties, &'static str> {
-        let id = unsafe { video::SDL_GetWindowProperties(self.inner) };
+        let id = unsafe { video::SDL_GetWindowProperties(self.raw) };
         if id == properties::SDL_PropertiesID(0) {
             Err("SDL_GetWindowProperties failed")
         } else {
@@ -109,18 +109,18 @@ impl  Window {
     }
 
     pub(crate) fn raw(&self) -> *mut video::SDL_Window {
-        self.inner
+        self.raw
     }
 }
 
 // Very important: we need to clean up the window when we're done
 impl Drop for Window {
     fn drop(&mut self) {
-        if !self.inner.is_null() {
+        if !self.raw.is_null() {
             unsafe {
-                sys::video::SDL_DestroyWindow(self.inner);
+                sys::video::SDL_DestroyWindow(self.raw);
             }
-            self.inner = std::ptr::null_mut();
+            self.raw = std::ptr::null_mut();
         }
     }
 }
