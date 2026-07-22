@@ -159,14 +159,14 @@ impl Renderer {
         let vertex_data_size = std::mem::size_of_val(&QUAD_VERTICES) as u32;
         let vertex_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::VERTEX, vertex_data_size)
             .expect("Failed to create vertex buffer");
-        device.upload_to_buffer(None, vertex_buffer, 0, bytemuck::cast_slice(&QUAD_VERTICES))
+        vertex_buffer.upload(None, 0, bytemuck::cast_slice(&QUAD_VERTICES))
             .expect("Failed to upload vertex data");
 
         // Index buffer
         let index_data_size = std::mem::size_of_val(&QUAD_INDICES) as u32;
         let index_buffer = device.create_buffer(SDL_GPUBufferUsageFlags::INDEX, index_data_size)
             .expect("Failed to create index buffer");
-        device.upload_to_buffer(None, index_buffer, 0, bytemuck::cast_slice(&QUAD_INDICES))
+        index_buffer.upload(None, 0, bytemuck::cast_slice(&QUAD_INDICES))
             .expect("Failed to upload index data");
 
         // Checkerboard texture
@@ -245,12 +245,12 @@ impl Renderer {
         target.cycle_resolve_texture = true;
 
         let pass = cmd.begin_render_pass(&[target], None)?;
-        pass.bind_graphics_pipeline(self.pipeline.clone());
-        pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: self.vertex_buffer, offset: 0 }]);
-        pass.bind_index_buffer(&GPUBufferBinding { buffer: self.index_buffer, offset: 0 }, SDL_GPUIndexElementSize::_16BIT);
+        pass.bind_graphics_pipeline(&self.pipeline);
+        pass.bind_vertex_buffers(0, &[GPUBufferBinding { buffer: &self.vertex_buffer, offset: 0 }]);
+        pass.bind_index_buffer(&GPUBufferBinding { buffer: &self.index_buffer, offset: 0 }, SDL_GPUIndexElementSize::_16BIT);
         pass.bind_fragment_samplers(0, &[TextureSamplerBinding {
-            texture: self.checkerboard_texture.clone(),
-            sampler: self.sampler.clone(),
+            texture: &self.checkerboard_texture,
+            sampler: &self.sampler,
         }]);
         let tint_color: [f32; 4] = [1.0, 0.8, 0.5, 1.0];
         pass.push_fragment_uniform_data(0, bytemuck::cast_slice(&tint_color));
@@ -283,7 +283,7 @@ fn run_compute_fill(device: &Device) {
         threadcount_z: 1,
     }).expect("Failed to create compute pipeline");
 
-    let mut buffer = device.create_buffer(
+    let buffer = device.create_buffer(
         SDL_GPUBufferUsageFlags::COMPUTE_STORAGE_WRITE,
         256 * std::mem::size_of::<u32>() as u32,
     ).expect("Failed to create compute buffer");
@@ -292,14 +292,14 @@ fn run_compute_fill(device: &Device) {
     {
         let pass = cmd.begin_compute_pass(
             &[],
-            &[StorageBufferReadWriteBinding { buffer, cycle: false }],
+            &[StorageBufferReadWriteBinding { buffer: &buffer, cycle: false }],
         ).expect("Failed to begin compute pass");
-        pass.bind_compute_pipeline(pipeline);
+        pass.bind_compute_pipeline(&pipeline);
         pass.dispatch(256 / 64, 1, 1);
     }
     cmd.submit().expect("Failed to submit compute command buffer");
 
-    let data = device.download_from_buffer_raw(buffer, 0, 0)
+    let data = buffer.download_raw(0, 0)
         .expect("Failed to download buffer");
     let values: &[u32] = bytemuck::cast_slice(&data);
     
@@ -315,7 +315,6 @@ fn run_compute_fill(device: &Device) {
         println!();
     }
 
-    buffer.destroy(device);
 }
 
 struct DemoApp {

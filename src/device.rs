@@ -200,8 +200,8 @@ pub struct TextureRegion {
 }
 
 impl TextureRegion {
-    pub fn full(texture: Texture, device: &Device) -> Self {
-        let (w, h) = device.get_texture_res(&texture);
+    pub fn full(texture: Texture) -> Self {
+        let (w, h) = texture.res();
         Self {
             texture,
             mip_level: 0,
@@ -215,7 +215,7 @@ impl TextureRegion {
         }
     }
 
-    pub(crate) fn to_raw(&self, _device: &Device) -> gpu::SDL_GPUTextureRegion {
+    pub(crate) fn to_raw(&self) -> gpu::SDL_GPUTextureRegion {
         gpu::SDL_GPUTextureRegion {
             texture: self.texture.raw(),
             mip_level: self.mip_level,
@@ -345,7 +345,6 @@ pub struct ShaderCreateInfo<'a> {
 
 struct DeviceInner {
     raw: *mut gpu::SDL_GPUDevice,
-    buffers: SlotMapRefCell<BufferSlot>,
     fences: SlotMapRefCell<FenceSlot>,
     swapchain: Cell<(*mut gpu::SDL_GPUTexture, u32, u32)>,
     swapchain_texture: Texture,
@@ -424,7 +423,6 @@ impl Device {
             let inner = DeviceInner {
                 raw: sys_device,
                 swapchain_texture: Texture::none(),
-                buffers: SlotMapRefCell::default(),
                 fences: SlotMapRefCell::default(),
                 swapchain: Cell::new((std::ptr::null_mut(), 0, 0)),
                 upload_transfer_buffer: Cell::new((std::ptr::null_mut(), 0)),
@@ -505,10 +503,6 @@ impl Device {
         }
     }
 
-
-    pub(crate) fn texture_raw(&self, handle: &Texture) -> *mut gpu::SDL_GPUTexture {
-        handle.raw()
-    }
 
     pub fn get_texture_res(&self, handle: &Texture) -> (u32, u32) {
         handle.res()
@@ -626,10 +620,9 @@ impl Device {
     }
 
     pub fn create_buffer(&self, usage: SDL_GPUBufferUsageFlags, size: u32) -> Result<GPUBuffer, String> {
-        let mut newbuf = self.create_buffer_sub(usage, size)?;
-        
-        let zerodata = vec![0u8;size as usize];
-        self.update_buffer(&mut newbuf,None,usage,zerodata.as_slice())?;
+        let newbuf = self.create_buffer_sub(usage, size)?;
+        let zerodata = vec![0u8; size as usize];
+        newbuf.upload(None, 0, &zerodata)?;
         Ok(newbuf)
     }
 
@@ -640,23 +633,16 @@ impl Device {
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
-            let raw = gpu::SDL_CreateGPUBuffer(        self.raw(), &info);
+            let raw = gpu::SDL_CreateGPUBuffer(self.raw(), &info);
             if raw.is_null() {
                 return Err(sdl_fail("SDL_CreateGPUBuffer"));
             }
-            let idx = self.inner().buffers.insert(BufferSlot { inner: raw, size });
-            Ok(GPUBuffer(idx))
+            Ok(GPUBuffer {
+                inner: Rc::new(GPUBufferData(raw, size, Rc::downgrade(&self.inner))),
+            })
         }
     }
 
-
-    pub(crate) fn buffer_raw(&self, handle: GPUBuffer) -> *mut gpu::SDL_GPUBuffer {
-        self.inner().buffers.with(handle.0, |slot| slot.inner)
-    }
-
-    pub fn get_buffer_size(&self, handle: GPUBuffer) -> u32 {
-        self.inner().buffers.with(handle.0, |slot| slot.size)
-    }
 
     pub fn create_sampler(&self, info: &gpu::SDL_GPUSamplerCreateInfo) -> Result<Sampler, String> {
         unsafe {
@@ -758,22 +744,6 @@ impl DeviceInner {
 }
 
 impl Device {
-    /// Upload data from a byte slice into a GPU buffer.
-    pub fn upload_to_buffer(&self, copy_pass: Option<&CopyPass>, buffer: GPUBuffer, offset: u32, data: &[u8]) -> Result<(), String> {
-        let size = data.len() as u32;
-        let di = self.inner();
-        let buf_size = di.buffers.with(buffer.0, |slot| slot.size);
-        if offset.saturating_add(size) > buf_size {
-            return Err("data exceeds buffer size".into());
-        }
-        let transfer = di.stage_upload(data)?;
-        let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
-        let dst = gpu::SDL_GPUBufferRegion { buffer: self.buffer_raw(buffer), offset, size };
-        di.with_copy_pass(copy_pass, |pass| unsafe {
-            gpu::SDL_UploadToGPUBuffer(pass, &src, &dst, true);
-        })
-    }
-
     /// Update a GPU buffer with new data, (re)creating it if invalid or too small.
     pub fn update_buffer(
         &self,
@@ -783,14 +753,11 @@ impl Device {
         data: &[u8],
     ) -> Result<(), String> {
         let size = data.len() as u32;
-        let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
+        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
         if needs_recreate {
-            if buffer.is_valid() {
-                buffer.destroy(self);
-            }
             *buffer = self.create_buffer_sub(usage, size)?;
         }
-        self.upload_to_buffer(copy_pass, *buffer, 0, data)
+        buffer.upload(copy_pass, 0, data)
     }
 
     /// Ensure a buffer exists and is at least `size` bytes, (re)creating it if needed.
@@ -800,100 +767,10 @@ impl Device {
         usage: SDL_GPUBufferUsageFlags,
         size: u32,
     ) -> Result<(), String> {
-        let needs_recreate = !buffer.is_valid() || self.get_buffer_size(*buffer) < size;
+        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
         if needs_recreate {
-            if buffer.is_valid() {
-                buffer.destroy(self);
-            }
             *buffer = self.create_buffer_sub(usage, size)?;
         }
-        Ok(())
-    }
-
-    /// Upload pixel data from a byte slice into a GPU texture region.
-    pub fn upload_to_texture(
-        &self,
-        copy_pass: Option<&CopyPass>,
-        region: &TextureRegion,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let di = self.inner();
-        let transfer = di.stage_upload(data)?;
-        let src = gpu::SDL_GPUTextureTransferInfo {
-            transfer_buffer: transfer,
-            offset: 0,
-            pixels_per_row: 0,
-            rows_per_layer: 0,
-        };
-        let dst = region.to_raw(self);
-        di.with_copy_pass(copy_pass, |pass| unsafe {
-            gpu::SDL_UploadToGPUTexture(pass, &src, &dst, true);
-        })
-    }
-
-    /// Download data from a GPU buffer into a Vec<u8>.
-    pub fn download_from_buffer_raw(&self, buffer: GPUBuffer, offset: u32, size: u32) -> Result<Vec<u8>, String> {
-        let di = self.inner();
-        let buf_size = di.buffers.with(buffer.0, |slot| slot.size);
-        let size = if size == 0 { buf_size - offset } else { size };
-        if offset.saturating_add(size) > buf_size {
-            return Err("requested range exceeds buffer size".into());
-        }
-        let transfer = di.create_download_transfer_buffer(size)?;
-        unsafe {
-            let cmd = gpu::SDL_AcquireGPUCommandBuffer(        self.raw());
-            if cmd.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
-            }
-            let pass = gpu::SDL_BeginGPUCopyPass(cmd);
-            if pass.is_null() {
-                gpu::SDL_CancelGPUCommandBuffer(cmd);
-                gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-                return Err(sdl_fail("SDL_BeginGPUCopyPass"));
-            }
-
-            let src = gpu::SDL_GPUBufferRegion { buffer: self.buffer_raw(buffer), offset, size };
-            let dst = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
-            gpu::SDL_DownloadFromGPUBuffer(pass, &src, &dst);
-            gpu::SDL_EndGPUCopyPass(pass);
-
-            let fence = gpu::SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-            if fence.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-                return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
-            }
-            if !gpu::SDL_WaitForGPUFences(        self.raw(), true, &fence, 1) {
-                gpu::SDL_ReleaseGPUFence(        self.raw(), fence);
-                gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-                return Err(sdl_fail("SDL_WaitForGPUFences"));
-            }
-            gpu::SDL_ReleaseGPUFence(        self.raw(), fence);
-
-            let ptr = gpu::SDL_MapGPUTransferBuffer(        self.raw(), transfer, false);
-            if ptr.is_null() {
-                gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
-            }
-            let mut data = vec![0u8; size as usize];
-            std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size as usize);
-            gpu::SDL_UnmapGPUTransferBuffer(        self.raw(), transfer);
-            gpu::SDL_ReleaseGPUTransferBuffer(        self.raw(), transfer);
-
-            Ok(data)
-        }
-    }
-
-    /// Download data from a GPU buffer into a value implementing [`bytemuck::Pod`].
-    pub fn download_from_buffer<T: bytemuck::Pod>(
-        &self,
-        buffer: GPUBuffer,
-        offset: u32,
-        dst: &mut T,
-    ) -> Result<(), String> {
-        let size = std::mem::size_of::<T>() as u32;
-        let data = self.download_from_buffer_raw(buffer, offset, size)?;
-        *dst = *bytemuck::from_bytes::<T>(&data);
         Ok(())
     }
 
@@ -1092,9 +969,22 @@ impl Drop for ComputePipelineData {
     }
 }
 
-struct BufferSlot {
-    inner: *mut gpu::SDL_GPUBuffer,
-    size: u32,
+pub(crate) struct GPUBufferData(pub(crate) *mut gpu::SDL_GPUBuffer, pub(crate) u32, Weak<RefCell<DeviceInner>>);
+
+impl Drop for GPUBufferData {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        if let Some(di) = self.2.upgrade() {
+            let di = di.borrow();
+            unsafe {
+                gpu::SDL_ReleaseGPUBuffer(di.raw, self.0);
+            }
+        } else if cfg!(feature = "verbose") {
+            ::log::warn!("GPUBuffer dropped after device was destroyed (leak)");
+        }
+    }
 }
 
 pub(crate) struct SamplerData(*mut gpu::SDL_GPUSampler, Weak<RefCell<DeviceInner>>);
@@ -1150,6 +1040,7 @@ impl std::fmt::Debug for Texture {
 
 impl Texture {
     /// Upload data to the full texture. Uses the internal Weak ref for device access.
+    /// Upload data to the full texture. Uses the internal Weak ref for device access.
     pub fn upload(&self, data: &[u8]) -> Result<(), String> {
         let td = self.inner.borrow();
         let di = td.2.upgrade().ok_or("Texture::upload: device dropped")?;
@@ -1174,6 +1065,29 @@ impl Texture {
             d: 1,
         };
         di.with_copy_pass(None, |pass| unsafe {
+            gpu::SDL_UploadToGPUTexture(pass, &src, &dst, true);
+        })
+    }
+
+    /// Upload data to a sub-region of the texture.
+    pub fn upload_region(
+        &self,
+        copy_pass: Option<&CopyPass>,
+        region: &TextureRegion,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let td = self.inner.borrow();
+        let di = td.2.upgrade().ok_or("Texture::upload_region: device dropped")?;
+        let di = di.borrow();
+        let transfer = di.stage_upload(data)?;
+        let src = gpu::SDL_GPUTextureTransferInfo {
+            transfer_buffer: transfer,
+            offset: 0,
+            pixels_per_row: 0,
+            rows_per_layer: 0,
+        };
+        let dst = region.to_raw();
+        di.with_copy_pass(copy_pass, |pass| unsafe {
             gpu::SDL_UploadToGPUTexture(pass, &src, &dst, true);
         })
     }
@@ -1391,31 +1305,139 @@ impl ComputePipeline {
 
 
 
-/// Handle to a GPU buffer stored in a `Device`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct GPUBuffer(pub i32);
+thread_local! {
+    static NONE_GPUBUFFER: GPUBuffer = GPUBuffer {
+        inner: Rc::new(GPUBufferData(std::ptr::null_mut(), 0, Weak::new())),
+    };
+}
 
-impl GPUBuffer {
-    pub fn destroy(&mut self, device: &Device) {
-        let slot = device.inner().buffers.remove(self.0);
-        unsafe {
-            gpu::SDL_ReleaseGPUBuffer(device.raw(), slot.inner);
-        }
-        self.0 = -1;
+/// Handle to a GPU buffer stored in a `Device`.
+#[derive(Clone)]
+pub struct GPUBuffer {
+    pub(crate) inner: Rc<GPUBufferData>,
+}
+
+impl std::fmt::Debug for GPUBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GPUBuffer")
+            .field("raw", &(self.inner.0 as usize))
+            .field("size", &self.inner.1)
+            .finish()
     }
-    pub fn is_valid(&self) -> bool 
-    {
-        self.0 != -1
+}
+
+impl PartialEq for GPUBuffer {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::as_ptr(&self.inner) == Rc::as_ptr(&other.inner)
+    }
+}
+
+impl Eq for GPUBuffer {}
+
+impl std::hash::Hash for GPUBuffer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Rc::as_ptr(&self.inner).hash(state);
     }
 }
 
 impl Default for GPUBuffer {
     fn default() -> Self {
-        Self
-        {
-            0: -1
+        GPUBuffer::none()
+    }
+}
+
+impl GPUBuffer {
+    pub fn none() -> GPUBuffer {
+        NONE_GPUBUFFER.with(|s| s.clone())
+    }
+
+    pub fn is_valid(&self) -> bool {
+        !self.inner.0.is_null()
+    }
+
+    pub fn raw(&self) -> *mut gpu::SDL_GPUBuffer {
+        self.inner.0
+    }
+
+    pub fn size(&self) -> u32 {
+        self.inner.1
+    }
+
+    pub fn upload(&self, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
+        let buf_size = self.size();
+        let data_size = data.len() as u32;
+        if offset.saturating_add(data_size) > buf_size {
+            return Err("data exceeds buffer size".into());
         }
-    }    
+        let di = self.inner.2.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
+        let di = di.borrow();
+        let transfer = di.stage_upload(data)?;
+        let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
+        let dst = gpu::SDL_GPUBufferRegion { buffer: self.raw(), offset, size: data_size };
+        di.with_copy_pass(copy_pass, |pass| unsafe {
+            gpu::SDL_UploadToGPUBuffer(pass, &src, &dst, true);
+        })
+    }
+
+    pub fn download_raw(&self, offset: u32, size: u32) -> Result<Vec<u8>, String> {
+        let buf_size = self.size();
+        let size = if size == 0 { buf_size - offset } else { size };
+        if offset.saturating_add(size) > buf_size {
+            return Err("requested range exceeds buffer size".into());
+        }
+        let di = self.inner.2.upgrade().ok_or("GPUBuffer::download_raw: device dropped")?;
+        let di = di.borrow();
+        let transfer = di.create_download_transfer_buffer(size)?;
+        unsafe {
+            let cmd = gpu::SDL_AcquireGPUCommandBuffer(di.raw);
+            if cmd.is_null() {
+                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+                return Err(sdl_fail("SDL_AcquireGPUCommandBuffer"));
+            }
+            let pass = gpu::SDL_BeginGPUCopyPass(cmd);
+            if pass.is_null() {
+                gpu::SDL_CancelGPUCommandBuffer(cmd);
+                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+                return Err(sdl_fail("SDL_BeginGPUCopyPass"));
+            }
+
+            let src = gpu::SDL_GPUBufferRegion { buffer: self.raw(), offset, size };
+            let dst = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer, offset: 0 };
+            gpu::SDL_DownloadFromGPUBuffer(pass, &src, &dst);
+            gpu::SDL_EndGPUCopyPass(pass);
+
+            let fence = gpu::SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+            if fence.is_null() {
+                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+                return Err(sdl_fail("SDL_SubmitGPUCommandBufferAndAcquireFence"));
+            }
+            if !gpu::SDL_WaitForGPUFences(di.raw, true, &fence, 1) {
+                gpu::SDL_ReleaseGPUFence(di.raw, fence);
+                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+                return Err(sdl_fail("SDL_WaitForGPUFences"));
+            }
+            gpu::SDL_ReleaseGPUFence(di.raw, fence);
+
+            let ptr = gpu::SDL_MapGPUTransferBuffer(di.raw, transfer, false);
+            if ptr.is_null() {
+                gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+                return Err(sdl_fail("SDL_MapGPUTransferBuffer"));
+            }
+            let mut data = vec![0u8; size as usize];
+            std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size as usize);
+            gpu::SDL_UnmapGPUTransferBuffer(di.raw, transfer);
+            gpu::SDL_ReleaseGPUTransferBuffer(di.raw, transfer);
+
+            Ok(data)
+        }
+    }
+
+    pub fn download<T: bytemuck::Pod>(&self, offset: u32, dst: &mut T) -> Result<(), String> {
+        let size = std::mem::size_of::<T>() as u32;
+        let data = self.download_raw(offset, size)?;
+        *dst = *bytemuck::from_bytes::<T>(&data);
+        Ok(())
+    }
 }
 
 thread_local! {
@@ -1473,15 +1495,14 @@ impl Sampler {
 }
 
 /// A texture+sampler pair for binding to a shader slot.
-#[derive(Clone)]
-pub struct TextureSamplerBinding {
-    pub texture: Texture,
-    pub sampler: Sampler,
+pub struct TextureSamplerBinding<'a> {
+    pub texture: &'a Texture,
+    pub sampler: &'a Sampler,
 }
 
-pub struct GPUBufferBinding {
+pub struct GPUBufferBinding<'a> {
     /// The buffer to bind.
-    pub buffer: GPUBuffer,
+    pub buffer: &'a GPUBuffer,
     /// The starting byte offset within the buffer.
     pub offset: u32,
 }
@@ -1540,14 +1561,14 @@ pub struct ComputePipelineCreateInfo<'a> {
 }
 
 /// A read-write storage buffer binding for a compute pass.
-pub struct StorageBufferReadWriteBinding {
-    pub buffer: GPUBuffer,
+pub struct StorageBufferReadWriteBinding<'a> {
+    pub buffer: &'a GPUBuffer,
     pub cycle: bool,
 }
 
 /// A read-write storage texture binding for a compute pass.
-pub struct StorageTextureReadWriteBinding {
-    pub texture: Texture,
+pub struct StorageTextureReadWriteBinding<'a> {
+    pub texture: &'a Texture,
     pub mip_level: u32,
     pub layer: u32,
     pub cycle: bool,
@@ -1675,7 +1696,7 @@ impl<'a> CommandBuffer<'a> {
                 return Err(sdl_fail("SDL_BeginGPUCopyPass"));
             }
             self.pass_active.set(true);
-            Ok(CopyPass { inner: raw, device: self.device, pass_active: &self.pass_active })
+            Ok(CopyPass { inner: raw, pass_active: &self.pass_active })
         }
     }
     pub fn begin_render_pass<'b>(
@@ -1713,14 +1734,14 @@ impl<'a> CommandBuffer<'a> {
     #[allow(deprecated)]
     pub fn begin_compute_pass<'b>(
         &'b self,
-        storage_texture_bindings: &[StorageTextureReadWriteBinding],
-        storage_buffer_bindings: &[StorageBufferReadWriteBinding],
+        storage_texture_bindings: &[StorageTextureReadWriteBinding<'_>],
+        storage_buffer_bindings: &[StorageBufferReadWriteBinding<'_>],
     ) -> Result<ComputePass<'b>, String> {
         assert!(!self.pass_active.get(), "a pass is already active on this command buffer");
         let raw_tex_bindings: Vec<gpu::SDL_GPUStorageTextureReadWriteBinding> = storage_texture_bindings
             .iter()
             .map(|b| gpu::SDL_GPUStorageTextureReadWriteBinding {
-                texture: self.device.texture_raw(&b.texture),
+                texture: b.texture.raw(),
                 mip_level: b.mip_level,
                 layer: b.layer,
                 cycle: b.cycle,
@@ -1732,7 +1753,7 @@ impl<'a> CommandBuffer<'a> {
         let raw_buf_bindings: Vec<gpu::SDL_GPUStorageBufferReadWriteBinding> = storage_buffer_bindings
             .iter()
             .map(|b| gpu::SDL_GPUStorageBufferReadWriteBinding {
-                buffer: self.device.buffer_raw(b.buffer),
+                buffer: b.buffer.raw(),
                 cycle: b.cycle,
                 padding1: 0,
                 padding2: 0,
@@ -1751,7 +1772,7 @@ impl<'a> CommandBuffer<'a> {
                 return Err(sdl_fail("SDL_BeginGPUComputePass"));
             }
             self.pass_active.set(true);
-            Ok(ComputePass { inner: raw, cmd_buf: self.inner, device: self.device, pass_active: &self.pass_active })
+            Ok(ComputePass { inner: raw, cmd_buf: self.inner, pass_active: &self.pass_active })
         }
     }
 }
@@ -1764,11 +1785,11 @@ pub struct RenderPass<'b> {
 }
 
 impl RenderPass<'_> {
-    pub fn bind_vertex_buffers(&self, first_slot: u32, bindings: &[GPUBufferBinding]) {
+    pub fn bind_vertex_buffers(&self, first_slot: u32, bindings: &[GPUBufferBinding<'_>]) {
         let raw_bindings: Vec<gpu::SDL_GPUBufferBinding> = bindings
             .iter()
             .map(|b| gpu::SDL_GPUBufferBinding {
-                buffer: self.device.buffer_raw(b.buffer),
+                buffer: b.buffer.raw(),
                 offset: b.offset,
             })
             .collect();
@@ -1782,7 +1803,7 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_graphics_pipeline(&self, pipeline: GraphicsPipeline) {
+    pub fn bind_graphics_pipeline(&self, pipeline: &GraphicsPipeline) {
         unsafe {
             gpu::SDL_BindGPUGraphicsPipeline(
                 self.inner,
@@ -1803,19 +1824,19 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn draw_primitives_indirect(&self, buffer: GPUBuffer, offset: u32, draw_count: u32) {
+    pub fn draw_primitives_indirect(&self, buffer: &GPUBuffer, offset: u32, draw_count: u32) {
         unsafe {
-            gpu::SDL_DrawGPUPrimitivesIndirect(self.inner, self.device.buffer_raw(buffer), offset, draw_count);
+            gpu::SDL_DrawGPUPrimitivesIndirect(self.inner, buffer.raw(), offset, draw_count);
         }
     }
 
-    pub fn draw_indexed_primitives_indirect(&self, buffer: GPUBuffer, offset: u32, draw_count: u32) {
+    pub fn draw_indexed_primitives_indirect(&self, buffer: &GPUBuffer, offset: u32, draw_count: u32) {
         unsafe {
-            gpu::SDL_DrawGPUIndexedPrimitivesIndirect(self.inner, self.device.buffer_raw(buffer), offset, draw_count);
+            gpu::SDL_DrawGPUIndexedPrimitivesIndirect(self.inner, buffer.raw(), offset, draw_count);
         }
     }
 
-    pub fn bind_fragment_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding]) {
+    pub fn bind_fragment_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding<'_>]) {
         let raw_bindings: Vec<gpu::SDL_GPUTextureSamplerBinding> = bindings
             .iter()
             .map(|b| gpu::SDL_GPUTextureSamplerBinding {
@@ -1855,10 +1876,10 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_index_buffer(&self, binding: &GPUBufferBinding, index_element_size: SDL_GPUIndexElementSize) {
-        assert!(binding.buffer.0 != -1);
+    pub fn bind_index_buffer(&self, binding: &GPUBufferBinding<'_>, index_element_size: SDL_GPUIndexElementSize) {
+        assert!(binding.buffer.is_valid());
         let raw = gpu::SDL_GPUBufferBinding {
-            buffer: self.device.buffer_raw(binding.buffer),
+            buffer: binding.buffer.raw(),
             offset: binding.offset,
         };
         unsafe {
@@ -1890,10 +1911,10 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_fragment_storage_textures(&self, first_slot: u32, textures: &[Texture]) {
+    pub fn bind_fragment_storage_textures(&self, first_slot: u32, textures: &[&Texture]) {
         let raw: Vec<*mut gpu::SDL_GPUTexture> = textures
             .iter()
-            .map(|t| self.device.texture_raw(t))
+            .map(|t| t.raw())
             .collect();
         unsafe {
             gpu::SDL_BindGPUFragmentStorageTextures(
@@ -1905,10 +1926,10 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_fragment_storage_buffers(&self, first_slot: u32, buffers: &[GPUBuffer]) {
+    pub fn bind_fragment_storage_buffers(&self, first_slot: u32, buffers: &[&GPUBuffer]) {
         let raw: Vec<*mut gpu::SDL_GPUBuffer> = buffers
             .iter()
-            .map(|b| self.device.buffer_raw(*b))
+            .map(|b| b.raw())
             .collect();
         unsafe {
             gpu::SDL_BindGPUFragmentStorageBuffers(
@@ -1920,10 +1941,10 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_vertex_storage_buffers(&self, first_slot: u32, buffers: &[GPUBuffer]) {
+    pub fn bind_vertex_storage_buffers(&self, first_slot: u32, buffers: &[&GPUBuffer]) {
         let raw: Vec<*mut gpu::SDL_GPUBuffer> = buffers
             .iter()
-            .map(|b| self.device.buffer_raw(*b))
+            .map(|b| b.raw())
             .collect();
         unsafe {
             gpu::SDL_BindGPUVertexStorageBuffers(
@@ -1947,26 +1968,25 @@ impl Drop for RenderPass<'_> {
 
 pub struct CopyPass<'b> {
     pub(crate) inner: *mut gpu::SDL_GPUCopyPass,
-    device: &'b Device,
     pass_active: &'b Cell<bool>,
 }
 
 impl CopyPass<'_> {
     pub fn copy_buffer_to_buffer(
         &self,
-        source: GPUBuffer,
+        source: &GPUBuffer,
         source_offset: u32,
-        destination: GPUBuffer,
+        destination: &GPUBuffer,
         destination_offset: u32,
         size: u32,
         cycle: bool,
     ) {
         let src = gpu::SDL_GPUBufferLocation {
-            buffer: self.device.buffer_raw(source),
+            buffer: source.raw(),
             offset: source_offset,
         };
         let dst = gpu::SDL_GPUBufferLocation {
-            buffer: self.device.buffer_raw(destination),
+            buffer: destination.raw(),
             offset: destination_offset,
         };
         unsafe {
@@ -1987,12 +2007,11 @@ impl Drop for CopyPass<'_> {
 pub struct ComputePass<'b> {
     inner: *mut gpu::SDL_GPUComputePass,
     cmd_buf: *mut gpu::SDL_GPUCommandBuffer,
-    device: &'b Device,
     pass_active: &'b Cell<bool>,
 }
 
 impl ComputePass<'_> {
-    pub fn bind_compute_pipeline(&self, pipeline: ComputePipeline) {
+    pub fn bind_compute_pipeline(&self, pipeline: &ComputePipeline) {
         unsafe {
             gpu::SDL_BindGPUComputePipeline(
                 self.inner,
@@ -2001,10 +2020,10 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn bind_storage_textures(&self, first_slot: u32, textures: &[Texture]) {
+    pub fn bind_storage_textures(&self, first_slot: u32, textures: &[&Texture]) {
         let raw: Vec<*mut gpu::SDL_GPUTexture> = textures
             .iter()
-            .map(|t| self.device.texture_raw(t))
+            .map(|t| t.raw())
             .collect();
         unsafe {
             gpu::SDL_BindGPUComputeStorageTextures(
@@ -2016,10 +2035,10 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn bind_storage_buffers(&self, first_slot: u32, buffers: &[GPUBuffer]) {
+    pub fn bind_storage_buffers(&self, first_slot: u32, buffers: &[&GPUBuffer]) {
         let raw: Vec<*mut gpu::SDL_GPUBuffer> = buffers
             .iter()
-            .map(|b| self.device.buffer_raw(*b))
+            .map(|b| b.raw())
             .collect();
         unsafe {
             gpu::SDL_BindGPUComputeStorageBuffers(
@@ -2031,7 +2050,7 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn bind_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding]) {
+    pub fn bind_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding<'_>]) {
         let raw_bindings: Vec<gpu::SDL_GPUTextureSamplerBinding> = bindings
             .iter()
             .map(|b| gpu::SDL_GPUTextureSamplerBinding {
@@ -2066,9 +2085,9 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn dispatch_indirect(&self, buffer: GPUBuffer, offset: u32) {
+    pub fn dispatch_indirect(&self, buffer: &GPUBuffer, offset: u32) {
         unsafe {
-            gpu::SDL_DispatchGPUComputeIndirect(self.inner, self.device.buffer_raw(buffer), offset);
+            gpu::SDL_DispatchGPUComputeIndirect(self.inner, buffer.raw(), offset);
         }
     }
 }
@@ -2134,9 +2153,6 @@ impl Drop for Device {
             for pending_tb in di.pending_transfer_buffers.borrow().iter() {
                 gpu::SDL_ReleaseGPUTransferBuffer(r, *pending_tb);
             }
-            di.buffers.for_each(|_, slot| {
-                gpu::SDL_ReleaseGPUBuffer(r, slot.inner);
-            });
             di.fences.for_each(|_, slot| {
                 gpu::SDL_ReleaseGPUFence(r, slot.inner);
             });
