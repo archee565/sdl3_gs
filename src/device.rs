@@ -378,36 +378,21 @@ impl Clone for Device {
     }
 }
 
-impl Device {
-    /// Update a GPU buffer with new data, (re)creating it if invalid or too small.
-    pub fn update_buffer(
-        &self,
-        buffer: &mut GPUBuffer,
-        copy_pass: Option<&CopyPass>,
-        usage: SDL_GPUBufferUsageFlags,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let size = data.len() as u32;
-        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
-        if needs_recreate {
-            *buffer = self.create_buffer_sub(usage, size)?;
+impl Default for Device {
+    fn default() -> Self {
+        Device {
+            inner: Rc::new(DeviceInner {
+                raw: std::ptr::null_mut(),
+                upload_transfer_buffer: RefCell::new(None),
+                cmd_buf_count: AtomicU32::new(0),
+                pending_transfer_buffers: RefCell::new(Vec::new()),
+                window: None,
+            }),
         }
-        buffer.upload(copy_pass, 0, data)
     }
+}
 
-    /// Ensure a buffer exists and is at least `size` bytes, (re)creating it if needed.
-    pub fn ensure_buffer_size(
-        &self,
-        buffer: &mut GPUBuffer,
-        usage: SDL_GPUBufferUsageFlags,
-        size: u32,
-    ) -> Result<(), String> {
-        let needs_recreate = !buffer.is_valid() || buffer.size() < size;
-        if needs_recreate {
-            *buffer = self.create_buffer_sub(usage, size)?;
-        }
-        Ok(())
-    }
+impl Device {
 
     pub fn get_swapchain_texture_format(&self) -> SDL_GPUTextureFormat {
         let window = self.inner.window.as_ref().expect("Device has no window");
@@ -799,7 +784,7 @@ impl Device {
                 return Err(sdl_fail("SDL_CreateGPUBuffer"));
             }
             Ok(GPUBuffer {
-                inner: Rc::new(GPUBufferData { raw, size, device: Rc::downgrade(&self.inner) }),
+                inner: Rc::new(GPUBufferData { raw: Cell::new(raw), size: Cell::new(size), usage, device: Rc::downgrade(&self.inner) }),
             })
         }
     }
@@ -998,19 +983,21 @@ impl Drop for ComputePipelineData {
 }
 
 pub(crate) struct GPUBufferData {
-    pub(crate) raw: *mut gpu::SDL_GPUBuffer,
-    pub(crate) size: u32,
+    pub(crate) raw: Cell<*mut gpu::SDL_GPUBuffer>,
+    pub(crate) size: Cell<u32>,
+    pub(crate) usage: SDL_GPUBufferUsageFlags,
     device: Weak<DeviceInner>,
 }
 
 impl Drop for GPUBufferData {
     fn drop(&mut self) {
-        if self.raw.is_null() {
+        let raw = self.raw.get();
+        if raw.is_null() {
             return;
         }
         if let Some(di) = self.device.upgrade() {
             unsafe {
-                gpu::SDL_ReleaseGPUBuffer(di.raw, self.raw);
+                gpu::SDL_ReleaseGPUBuffer(di.raw, raw);
             }
         } else if cfg!(feature = "verbose") {
             ::log::warn!("GPUBuffer dropped after device was destroyed (leak)");
@@ -1321,7 +1308,7 @@ impl ComputePipeline {
 
 thread_local! {
     static NONE_GPUBUFFER: GPUBuffer = GPUBuffer {
-        inner: Rc::new(GPUBufferData { raw: std::ptr::null_mut(), size: 0, device: Weak::new() }),
+        inner: Rc::new(GPUBufferData { raw: Cell::new(std::ptr::null_mut()), size: Cell::new(0), usage: SDL_GPUBufferUsageFlags(0), device: Weak::new() }),
     };
 }
 
@@ -1334,8 +1321,8 @@ pub struct GPUBuffer {
 impl std::fmt::Debug for GPUBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GPUBuffer")
-            .field("raw", &(self.inner.raw as usize))
-            .field("size", &self.inner.size)
+            .field("raw", &(self.inner.raw.get() as usize))
+            .field("size", &self.inner.size.get())
             .finish()
     }
 }
@@ -1366,22 +1353,59 @@ impl GPUBuffer {
     }
 
     pub fn is_valid(&self) -> bool {
-        !self.inner.raw.is_null()
+        !self.inner.raw.get().is_null()
     }
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUBuffer {
-        self.inner.raw
+        self.inner.raw.get()
     }
 
     pub fn size(&self) -> u32 {
-        self.inner.size
+        self.inner.size.get()
+    }
+
+    pub fn update(&mut self, device: &Device, usage: SDL_GPUBufferUsageFlags, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
+        if !self.is_valid()
+        {
+            *self = device.create_buffer(usage, data.len() as u32+offset)?;
+        }
+        self.upload(copy_pass, offset, data)
     }
 
     pub fn upload(&self, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
-        let buf_size = self.size();
         let data_size = data.len() as u32;
-        if offset.saturating_add(data_size) > buf_size {
-            return Err("data exceeds buffer size".into());
+        let required_size = offset.saturating_add(data_size);
+        let buf_size = self.inner.size.get();
+        if required_size > buf_size {
+            let weak = self.inner.device.clone();
+            let di = weak.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
+            let info = gpu::SDL_GPUBufferCreateInfo {
+                usage: self.inner.usage,
+                size: required_size,
+                props: sys::properties::SDL_PropertiesID(0),
+            };
+            let (new_raw, old_raw) = unsafe {
+                let new_raw = gpu::SDL_CreateGPUBuffer(di.raw, &info);
+                if new_raw.is_null() {
+                    return Err(sdl_fail("SDL_CreateGPUBuffer"));
+                }
+                (new_raw, self.inner.raw.get())
+            };
+            let preserve_size = offset.min(buf_size);
+            if preserve_size > 0 {
+                let src = gpu::SDL_GPUBufferLocation { buffer: old_raw, offset: 0 };
+                let dst = gpu::SDL_GPUBufferLocation { buffer: new_raw, offset: 0 };
+                di.with_copy_pass(copy_pass, |pass| unsafe {
+                    gpu::SDL_CopyGPUBufferToBuffer(pass, &src, &dst, preserve_size, false);
+                })?;
+            }
+            unsafe {
+                if !old_raw.is_null() {
+                    gpu::SDL_ReleaseGPUBuffer(di.raw, old_raw);
+                }
+                self.inner.raw.set(new_raw);
+                self.inner.size.set(required_size);
+            }
         }
         let weak = self.inner.device.clone();
         let di = weak.upgrade().ok_or("GPUBuffer::upload: device dropped")?;
@@ -1389,7 +1413,7 @@ impl GPUBuffer {
         let src = gpu::SDL_GPUTransferBufferLocation { transfer_buffer: transfer.raw(), offset: 0 };
         let dst = gpu::SDL_GPUBufferRegion { buffer: self.raw(), offset, size: data_size };
         di.with_copy_pass(copy_pass, |pass| unsafe {
-            gpu::SDL_UploadToGPUBuffer(pass, &src, &dst, true);
+            gpu::SDL_UploadToGPUBuffer(pass, &src, &dst, offset == 0);
         })
     }
 
