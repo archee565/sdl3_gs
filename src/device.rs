@@ -1367,6 +1367,7 @@ impl GPUBuffer {
     pub fn update(&mut self, device: &Device, usage: SDL_GPUBufferUsageFlags, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
         if !self.is_valid()
         {
+            if data.len()==0 { return Ok(());}
             *self = device.create_buffer(usage, data.len() as u32+offset)?;
         }
         self.upload(copy_pass, offset, data)
@@ -1374,6 +1375,7 @@ impl GPUBuffer {
 
     pub fn upload(&self, copy_pass: Option<&CopyPass>, offset: u32, data: &[u8]) -> Result<(), String> {
         let data_size = data.len() as u32;
+        if data_size==0 { return Ok(())}
         let required_size = offset.saturating_add(data_size);
         let buf_size = self.inner.size.get();
         if required_size > buf_size {
@@ -1417,7 +1419,7 @@ impl GPUBuffer {
         })
     }
 
-    pub fn download_raw(&self, offset: u32, size: u32) -> Result<Vec<u8>, String> {
+    pub fn download_vecu8(&self, offset: u32, size: u32) -> Result<Vec<u8>, String> {
         let buf_size = self.size();
         let size = if size == 0 { buf_size - offset } else { size };
         if offset.saturating_add(size) > buf_size {
@@ -1457,7 +1459,7 @@ impl GPUBuffer {
 
     pub fn download<T: bytemuck::Pod>(&self, offset: u32, dst: &mut T) -> Result<(), String> {
         let size = std::mem::size_of::<T>() as u32;
-        let data = self.download_raw(offset, size)?;
+        let data = self.download_vecu8(offset, size)?;
         *dst = *bytemuck::from_bytes::<T>(&data);
         Ok(())
     }

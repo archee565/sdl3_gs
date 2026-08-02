@@ -11,6 +11,8 @@ pub use sdl3_sys as sys;
 pub use sdl3_sys::init::*;
 pub use sdl3_sys::video::*;
 
+pub use proc_macros::*;
+
 pub fn sdl_init(flags : SDL_InitFlags) -> bool
 {
     unsafe
