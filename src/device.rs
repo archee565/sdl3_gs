@@ -1875,10 +1875,13 @@ impl RenderPass<'_> {
     pub fn bind_fragment_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding<'_>]) {
         let raw_bindings: Vec<gpu::SDL_GPUTextureSamplerBinding> = bindings
             .iter()
-            .map(|b| gpu::SDL_GPUTextureSamplerBinding {
+            .map(|b|{
+                assert!(b.texture.is_valid());
+                assert!(b.sampler.is_valid());
+                gpu::SDL_GPUTextureSamplerBinding {
                 texture: b.texture.raw(),
                 sampler: b.sampler.raw(),
-            })
+            }})
             .collect();
         unsafe {
             gpu::SDL_BindGPUFragmentSamplers(

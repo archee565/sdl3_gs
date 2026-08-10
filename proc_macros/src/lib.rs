@@ -82,6 +82,7 @@ fn get_sdl_vertex_format(ty: &syn::Type) -> proc_macro2::TokenStream {
         "CVec2" | "Vec2" | "[f32 ; 2]" | "[f32; 2]" => quote!(SDL_GPUVertexElementFormat::FLOAT2),
         "CVec3" | "Vec3" | "[f32 ; 3]" | "[f32; 3]" => quote!(SDL_GPUVertexElementFormat::FLOAT3),
         "CVec4" | "Vec4" | "[f32 ; 4]" | "[f32; 4]" | "Quat" => quote!(SDL_GPUVertexElementFormat::FLOAT4),
+        "[i8 ; 4]" | "[i8; 4]" => quote!(SDL_GPUVertexElementFormat::BYTE4),
         "[i32 ; 4]" | "[i32; 4]" => quote!(SDL_GPUVertexElementFormat::INT4),
         "f32" => quote!(SDL_GPUVertexElementFormat::FLOAT),
         "u32" => quote!(SDL_GPUVertexElementFormat::UBYTE4_NORM),
