@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-#[proc_macro_derive(SDLVertexDesc)]
+#[proc_macro_derive(SDLVertexDesc, attributes(sdl_vertex_desc))]
 pub fn derive_sdl_vertex_desc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
@@ -35,13 +35,21 @@ pub fn derive_sdl_vertex_desc(input: TokenStream) -> TokenStream {
 
     let attributes: Vec<_> = fields
         .iter()
-        .enumerate()
-        .map(|(idx, field)| {
+        .filter_map(|field| {
+            let (skip, format_override) = field_options(field);
+            if skip {
+                return None;
+            }
+
             let field_name = field.ident.as_ref().unwrap();
             let field_type = &field.ty;
-            let location = idx as u32;
-            let format = get_sdl_vertex_format(field_type);
+            let format = format_override.unwrap_or_else(|| get_sdl_vertex_format(field_type));
 
+            Some((field_name, format))
+        })
+        .enumerate()
+        .map(|(location, (field_name, format))| {
+            let location = location as u32;
             quote! {
                 SDL_GPUVertexAttribute {
                     location: #location,
@@ -73,6 +81,33 @@ pub fn derive_sdl_vertex_desc(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+fn field_options(field: &syn::Field) -> (bool, Option<proc_macro2::TokenStream>) {
+    let mut skip = false;
+    let mut format = None;
+
+    for attr in &field.attrs {
+        if !attr.path().is_ident("sdl_vertex_desc") {
+            continue;
+        }
+
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("skip") {
+                skip = true;
+            } else if meta.path.is_ident("format") {
+                let value = meta.value()?;
+                let format_name: syn::Ident = value.parse()?;
+                format = Some(quote!(SDL_GPUVertexElementFormat::#format_name));
+            } else {
+                return Err(meta.error("expected `skip` or `format = FORMAT`"));
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("invalid sdl_vertex_desc attribute: {error}"));
+    }
+
+    (skip, format)
 }
 
 fn get_sdl_vertex_format(ty: &syn::Type) -> proc_macro2::TokenStream {
