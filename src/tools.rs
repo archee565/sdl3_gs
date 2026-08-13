@@ -36,7 +36,7 @@ fn log(msg: &str) {
     }
 }
 
-pub fn prepare_shaders(shader_dir : &Path, shader_intermediary_dir : &Path) {
+pub fn prepare_shaders(shader_dir: &Path, shader_intermediary_dir: &Path) {
     let out_dir = PathBuf::from(shader_intermediary_dir);
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let apple = target_os == "macos" || target_os == "ios";
@@ -79,7 +79,10 @@ pub fn prepare_shaders(shader_dir : &Path, shader_intermediary_dir : &Path) {
                 let stage_flag = format!("--{}={}", ext, src_path.to_str().unwrap());
                 let output_flag = format!("--output={}", msl_path.to_str().unwrap());
                 let reflect_flag = format!("--reflect={}", json_path.to_str().unwrap());
-                log(&format!("glslcc {} --lang=msl --reflect", src_path.display()));
+                log(&format!(
+                    "glslcc {} --lang=msl --reflect",
+                    src_path.display()
+                ));
 
                 let status = Command::new("glslcc")
                     .args([&stage_flag, &output_flag, "--lang=msl", &reflect_flag])
@@ -96,14 +99,14 @@ pub fn prepare_shaders(shader_dir : &Path, shader_intermediary_dir : &Path) {
             let spv_path = out_dir.join(&spv_name);
 
             if needs_rebuild(&src_path, &spv_path) {
-                log(&format!("glslc {} -o {}", src_path.display(), spv_path.display()));
+                log(&format!(
+                    "glslc {} -o {}",
+                    src_path.display(),
+                    spv_path.display()
+                ));
 
                 let status = Command::new("glslc")
-                    .args([
-                        src_path.to_str().unwrap(),
-                        "-o",
-                        spv_path.to_str().unwrap(),
-                    ])
+                    .args([src_path.to_str().unwrap(), "-o", spv_path.to_str().unwrap()])
                     .status()
                     .expect("failed to run glslc — is it installed?");
 
@@ -118,7 +121,11 @@ pub fn prepare_shaders(shader_dir : &Path, shader_intermediary_dir : &Path) {
                 let dxil_path = out_dir.join(&dxil_name);
 
                 if needs_rebuild(&spv_path, &dxil_path) {
-                    log(&format!("shadercross {} -o {}", spv_path.display(), dxil_path.display()));
+                    log(&format!(
+                        "shadercross {} -o {}",
+                        spv_path.display(),
+                        dxil_path.display()
+                    ));
 
                     let status = Command::new("shadercross")
                         .args([
@@ -137,13 +144,19 @@ pub fn prepare_shaders(shader_dir : &Path, shader_intermediary_dir : &Path) {
 
             // Generate reflection JSON from SPIR-V with shadercross
             if needs_rebuild(&spv_path, &json_path) {
-                log(&format!("shadercross {} -d JSON -o {}", spv_path.display(), json_path.display()));
+                log(&format!(
+                    "shadercross {} -d JSON -o {}",
+                    spv_path.display(),
+                    json_path.display()
+                ));
 
                 let status = Command::new("shadercross")
                     .args([
                         spv_path.to_str().unwrap(),
-                        "-d", "JSON",
-                        "-o", json_path.to_str().unwrap(),
+                        "-d",
+                        "JSON",
+                        "-o",
+                        json_path.to_str().unwrap(),
                     ])
                     .status()
                     .expect("failed to run shadercross — is it installed?");

@@ -3,9 +3,9 @@ use sys::events::*;
 
 // Re-export types that users need to match on or inspect
 pub use sys::events::SDL_EventType;
-pub use sys::scancode::SDL_Scancode;
 pub use sys::keycode::{SDL_Keycode, SDL_Keymod};
 pub use sys::mouse::{SDL_MouseButtonFlags, SDL_MouseWheelDirection};
+pub use sys::scancode::SDL_Scancode;
 pub use sys::video::SDL_WindowID;
 
 /// A parsed SDL event.

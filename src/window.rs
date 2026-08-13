@@ -12,35 +12,35 @@ pub struct DisplayMode {
     pub pixel_density: f32,
 }
 
-pub struct Window
-{
-    raw : *mut sys::video::SDL_Window,
+pub struct Window {
+    raw: *mut sys::video::SDL_Window,
 }
 
-impl  Window {
-    pub fn set_fullscreen(&self, fullscreen : bool)
-    {
-        unsafe { sys::video::SDL_SetWindowFullscreen(self.raw, fullscreen); }
+impl Window {
+    pub fn set_fullscreen(&self, fullscreen: bool) {
+        unsafe {
+            sys::video::SDL_SetWindowFullscreen(self.raw, fullscreen);
+        }
     }
 
     pub fn create(
-            title: &str,
-            res: (u32, u32),
-            flags: sys::video::SDL_WindowFlags,
-        ) -> Result<Self, String> {
+        title: &str,
+        res: (u32, u32),
+        flags: sys::video::SDL_WindowFlags,
+    ) -> Result<Self, String> {
         // Make sure SDL has been initialized before calling this
         // (usually done with SDL_Init or SDL_InitSubSystem)
 
         // Convert Rust &str → C string (null-terminated)
-        let title_c = std::ffi::CString::new(title)
-            .map_err(|e| format!("Invalid title string: {}", e))?;
+        let title_c =
+            std::ffi::CString::new(title).map_err(|e| format!("Invalid title string: {}", e))?;
 
         unsafe {
             let window_ptr = sys::video::SDL_CreateWindow(
-                title_c.as_ptr(),                    // title
-                res.0 as i32,                        // width
-                res.1 as i32,                        // height
-                flags,                        // flags (SDL_WindowFlags is usually u32)
+                title_c.as_ptr(), // title
+                res.0 as i32,     // width
+                res.1 as i32,     // height
+                flags,            // flags (SDL_WindowFlags is usually u32)
             );
 
             if window_ptr.is_null() {
@@ -62,17 +62,25 @@ impl  Window {
             Ok(Window { raw: window_ptr })
         }
     }
-    
+
     pub fn set_position(&self, x: i32, y: i32) -> Result<(), &'static str> {
         let ok = unsafe { video::SDL_SetWindowPosition(self.raw, x, y) };
-        if ok { Ok(()) } else { Err("SDL_SetWindowPosition failed") }
+        if ok {
+            Ok(())
+        } else {
+            Err("SDL_SetWindowPosition failed")
+        }
     }
 
     pub fn get_position(&self) -> Result<(i32, i32), &'static str> {
         let mut x: i32 = 0;
         let mut y: i32 = 0;
         let ok = unsafe { video::SDL_GetWindowPosition(self.raw, &mut x, &mut y) };
-        if ok { Ok((x, y)) } else { Err("SDL_GetWindowPosition failed") }
+        if ok {
+            Ok((x, y))
+        } else {
+            Err("SDL_GetWindowPosition failed")
+        }
     }
 
     pub fn center(&self) -> Result<(), &'static str> {

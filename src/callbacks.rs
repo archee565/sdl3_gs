@@ -1,10 +1,10 @@
 /*
 Replacement for  sdl3-sys/sdl3-main
-The original sdl3-sys/sdl3-main didn't work on Android and iOS as the SDL_Main 
+The original sdl3-sys/sdl3-main didn't work on Android and iOS as the SDL_Main
 wasn't exposed in the library build.
 */
 
-use crate::event::{parse_event, Event};
+use crate::event::{Event, parse_event};
 use sdl3_sys as sys;
 use sys::events::SDL_Event;
 use sys::init::SDL_AppResult;
@@ -48,9 +48,7 @@ unsafe extern "C" fn app_init<T: App>(
     }
 }
 
-unsafe extern "C" fn app_iterate<T: App>(
-    appstate: *mut core::ffi::c_void,
-) -> SDL_AppResult {
+unsafe extern "C" fn app_iterate<T: App>(appstate: *mut core::ffi::c_void) -> SDL_AppResult {
     let app = unsafe { &mut *(appstate as *mut T) };
     if app.iterate() {
         SDL_AppResult::CONTINUE
@@ -72,10 +70,7 @@ unsafe extern "C" fn app_event<T: App>(
     }
 }
 
-unsafe extern "C" fn app_quit<T: App>(
-    appstate: *mut core::ffi::c_void,
-    _result: SDL_AppResult,
-) {
+unsafe extern "C" fn app_quit<T: App>(appstate: *mut core::ffi::c_void, _result: SDL_AppResult) {
     if !appstate.is_null() {
         let mut app = unsafe { Box::from_raw(appstate as *mut T) };
         app.quit();
@@ -113,9 +108,8 @@ pub unsafe fn enter_main_callbacks<T: App>(
 /// until one of them signals quit, at which point `T::quit` is called and the
 /// process exits.
 pub fn run<T: App>() -> ! {
-    unsafe
-    {
-        let rc = enter_main_callbacks::<T>(0, std::ptr::null_mut());        
+    unsafe {
+        let rc = enter_main_callbacks::<T>(0, std::ptr::null_mut());
         std::process::exit(rc)
     }
 }
