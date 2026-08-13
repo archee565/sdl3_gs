@@ -224,7 +224,7 @@ impl Renderer {
         // Sampler
         #[allow(deprecated)]
         let sampler = device
-            .create_sampler(&gpu::SDL_GPUSamplerCreateInfo {
+            .create_sampler(&SamplerCreateInfo {
                 min_filter: SDL_GPUFilter::LINEAR,
                 mag_filter: SDL_GPUFilter::LINEAR,
                 mipmap_mode: SDL_GPUSamplerMipmapMode::LINEAR,
@@ -238,9 +238,6 @@ impl Renderer {
                 max_lod: 0.0,
                 enable_anisotropy: false,
                 enable_compare: false,
-                padding1: 0,
-                padding2: 0,
-                props: sdl3_gs::sys::properties::SDL_PropertiesID(0),
             })
             .expect("Failed to create sampler");
 

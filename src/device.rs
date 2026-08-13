@@ -24,7 +24,6 @@ pub use gpu::SDL_GPUPrimitiveType;
 pub use gpu::SDL_GPURasterizerState;
 pub use gpu::SDL_GPUSampleCount;
 pub use gpu::SDL_GPUSamplerAddressMode;
-pub use gpu::SDL_GPUSamplerCreateInfo;
 pub use gpu::SDL_GPUSamplerMipmapMode;
 pub use gpu::SDL_GPUShaderFormat;
 pub use gpu::SDL_GPUShaderStage;
@@ -685,6 +684,34 @@ impl Device {
         }
     }
 
+    /// Upload data to a sub-region of a texture.
+    pub fn upload_region(
+        &self,
+        copy_pass: Option<&CopyPass>,
+        region: &TextureRegion,
+        data: &[u8],
+    ) -> Result<(), String> {
+        let weak = Rc::downgrade(&self.inner);
+        let transfer = self.inner.stage_upload(data, &weak)?;
+        let src = gpu::SDL_GPUTextureTransferInfo {
+            transfer_buffer: transfer.raw(),
+            offset: 0,
+            pixels_per_row: 0,
+            rows_per_layer: 0,
+        };
+        let dst = region.to_raw();
+        if let Some(pass) = copy_pass {
+            unsafe {
+                gpu::SDL_UploadToGPUTexture(pass.inner, &src, &dst, false);
+            }
+            Ok(())
+        } else {
+            self.submit_upload(|pass| unsafe {
+                gpu::SDL_UploadToGPUTexture(pass, &src, &dst, false);
+            })
+        }
+    }
+
     pub fn create_shader(&self, info: &ShaderCreateInfo) -> Result<Shader, String> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
             .map_err(|_| String::from("entrypoint contains interior nul byte"))?;
@@ -846,9 +873,10 @@ impl Device {
         }
     }
 
-    pub fn create_sampler(&self, info: &gpu::SDL_GPUSamplerCreateInfo) -> Result<Sampler, String> {
+    pub fn create_sampler(&self, info: &SamplerCreateInfo) -> Result<Sampler, String> {
+        let raw_info = info.to_raw();
         unsafe {
-            let raw = gpu::SDL_CreateGPUSampler(self.raw(), info);
+            let raw = gpu::SDL_CreateGPUSampler(self.raw(), &raw_info);
             if raw.is_null() {
                 return Err(sdl_fail("SDL_CreateGPUSampler"));
             }
@@ -858,6 +886,77 @@ impl Device {
                     device: Rc::downgrade(&self.inner),
                 }),
             })
+        }
+    }
+}
+
+/// Parameters used to create a sampler.
+pub struct SamplerCreateInfo {
+    /// The minification filter to apply to lookups.
+    pub min_filter: SDL_GPUFilter,
+    /// The magnification filter to apply to lookups.
+    pub mag_filter: SDL_GPUFilter,
+    /// The mipmap filter to apply to lookups.
+    pub mipmap_mode: SDL_GPUSamplerMipmapMode,
+    /// The addressing mode for U coordinates outside [0, 1).
+    pub address_mode_u: SDL_GPUSamplerAddressMode,
+    /// The addressing mode for V coordinates outside [0, 1).
+    pub address_mode_v: SDL_GPUSamplerAddressMode,
+    /// The addressing mode for W coordinates outside [0, 1).
+    pub address_mode_w: SDL_GPUSamplerAddressMode,
+    /// The bias to be added to mipmap LOD calculation.
+    pub mip_lod_bias: f32,
+    /// The anisotropy value clamp used by the sampler.
+    pub max_anisotropy: f32,
+    /// The comparison operator to apply to fetched data before filtering.
+    pub compare_op: SDL_GPUCompareOp,
+    /// Clamps the minimum of the computed LOD value.
+    pub min_lod: f32,
+    /// Clamps the maximum of the computed LOD value.
+    pub max_lod: f32,
+    /// Whether to enable anisotropic filtering.
+    pub enable_anisotropy: bool,
+    /// Whether to enable comparison against a reference value during lookups.
+    pub enable_compare: bool,
+}
+
+impl Default for SamplerCreateInfo {
+    fn default() -> Self {
+        Self {
+            min_filter: SDL_GPUFilter::LINEAR,
+            mag_filter: SDL_GPUFilter::LINEAR,
+            mipmap_mode: SDL_GPUSamplerMipmapMode::LINEAR,
+            address_mode_u: SDL_GPUSamplerAddressMode::REPEAT,
+            address_mode_v: SDL_GPUSamplerAddressMode::REPEAT,
+            address_mode_w: SDL_GPUSamplerAddressMode::REPEAT,
+            mip_lod_bias: 0.0,
+            max_anisotropy: 4.0,
+            compare_op: SDL_GPUCompareOp::NEVER,
+            min_lod: 0.0,
+            max_lod: f32::MAX,
+            enable_anisotropy: true,
+            enable_compare: false,
+        }
+    }
+}
+
+impl SamplerCreateInfo {
+    fn to_raw(&self) -> gpu::SDL_GPUSamplerCreateInfo {
+        gpu::SDL_GPUSamplerCreateInfo {
+            min_filter: self.min_filter,
+            mag_filter: self.mag_filter,
+            mipmap_mode: self.mipmap_mode,
+            address_mode_u: self.address_mode_u,
+            address_mode_v: self.address_mode_v,
+            address_mode_w: self.address_mode_w,
+            mip_lod_bias: self.mip_lod_bias,
+            max_anisotropy: self.max_anisotropy,
+            compare_op: self.compare_op,
+            min_lod: self.min_lod,
+            max_lod: self.max_lod,
+            enable_anisotropy: self.enable_anisotropy,
+            enable_compare: self.enable_compare,
+            ..Default::default()
         }
     }
 }
@@ -1164,36 +1263,6 @@ impl Texture {
         })
     }
 
-    /// Upload data to a sub-region of the texture.
-    pub fn upload_region(
-        &self,
-        copy_pass: Option<&CopyPass>,
-        region: &TextureRegion,
-        data: &[u8],
-    ) -> Result<(), String> {
-        let weak = self.inner.device.clone();
-        let di = weak
-            .upgrade()
-            .ok_or("Texture::upload_region: device dropped")?;
-        let transfer = di.stage_upload(data, &weak)?;
-        let src = gpu::SDL_GPUTextureTransferInfo {
-            transfer_buffer: transfer.raw(),
-            offset: 0,
-            pixels_per_row: 0,
-            rows_per_layer: 0,
-        };
-        let dst = region.to_raw();
-        if let Some(pass) = copy_pass {
-            unsafe {
-                gpu::SDL_UploadToGPUTexture(pass.inner, &src, &dst, false);
-            }
-            Ok(())
-        } else {
-            Device { inner: di.clone() }.submit_upload(|pass| unsafe {
-                gpu::SDL_UploadToGPUTexture(pass, &src, &dst, false);
-            })
-        }
-    }
 }
 
 impl Default for Texture {
@@ -1859,6 +1928,14 @@ impl CommandBuffer {
         let raw = info.to_raw(&self.device);
         unsafe {
             gpu::SDL_BlitGPUTexture(self.inner, &raw);
+        }
+    }
+
+    /// Generate all mip levels for a texture from its base level.
+    /// Must not be called inside any pass.
+    pub fn generate_mipmaps(&mut self, texture: &Texture) {
+        unsafe {
+            gpu::SDL_GenerateMipmapsForGPUTexture(self.inner, texture.raw());
         }
     }
 }
