@@ -1236,7 +1236,7 @@ impl std::fmt::Debug for Texture {
 
 impl Texture {
     /// Upload data to the full texture. Uses the internal Weak ref for device access.
-    pub fn upload(&self, data: &[u8]) -> Result<(), String> {
+    pub fn upload(&self, copy_pass: Option<&CopyPass>, data: &[u8]) -> Result<(), String> {
         let weak = self.inner.device.clone();
         let di = weak.upgrade().ok_or("Texture::upload: device dropped")?;
         let res = self.inner.res;
@@ -1258,9 +1258,16 @@ impl Texture {
             h: res.1,
             d: 1,
         };
-        Device { inner: di.clone() }.submit_upload(|pass| unsafe {
-            gpu::SDL_UploadToGPUTexture(pass, &src, &dst, false);
-        })
+        if let Some(pass) = copy_pass {
+            unsafe {
+                gpu::SDL_UploadToGPUTexture(pass.inner, &src, &dst, false);
+            }
+            Ok(())
+        } else {
+            Device { inner: di }.submit_upload(|pass| unsafe {
+                gpu::SDL_UploadToGPUTexture(pass, &src, &dst, false);
+            })
+        }
     }
 
 }
