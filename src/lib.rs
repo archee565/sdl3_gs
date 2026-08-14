@@ -2,6 +2,7 @@
 pub mod callbacks;
 pub mod device;
 pub mod event;
+pub mod filesystem;
 pub mod properties;
 pub mod tools;
 pub mod window;
