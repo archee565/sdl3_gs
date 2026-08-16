@@ -874,6 +874,16 @@ impl Device {
     }
 
     pub fn create_sampler(&self, info: &SamplerCreateInfo) -> Result<Sampler, String> {
+        if info.enable_anisotropy
+            && (info.min_filter != gpu::SDL_GPUFilter::LINEAR
+                || info.mag_filter != gpu::SDL_GPUFilter::LINEAR
+                || info.mipmap_mode != gpu::SDL_GPUSamplerMipmapMode::LINEAR)
+        {
+            return Err(
+                "create_sampler: anisotropic filtering requires LINEAR min/mag/mipmap filters"
+                    .into(),
+            );
+        }
         let raw_info = info.to_raw();
         unsafe {
             let raw = gpu::SDL_CreateGPUSampler(self.raw(), &raw_info);
@@ -933,8 +943,8 @@ impl Default for SamplerCreateInfo {
             max_anisotropy: 4.0,
             compare_op: SDL_GPUCompareOp::NEVER,
             min_lod: 0.0,
-            max_lod: f32::MAX,
-            enable_anisotropy: true,
+            max_lod: 1000.0,
+            enable_anisotropy: false,
             enable_compare: false,
         }
     }
