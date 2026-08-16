@@ -483,7 +483,7 @@ impl Device {
             gpu::SDL_EndGPUCopyPass(pass);
         }
         cmd.pass_active.set(false);
-        cmd.submit_and_acquire_fence().map(|_| ())
+        cmd.submit()
     }
 
     pub fn wait_for_swapchain(&self) -> Result<(), String> {
