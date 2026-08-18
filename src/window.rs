@@ -119,6 +119,13 @@ impl Window {
     pub(crate) fn raw(&self) -> *mut video::SDL_Window {
         self.raw
     }
+
+    /// Returns the underlying `SDL_Window` pointer for use with raw SDL
+    /// (e.g. `SDL_GL_CreateContext`, `SDL_GL_SwapWindow`, `SDL_GetWindowID`).
+    /// The pointer is owned by this `Window`; do not destroy it manually.
+    pub fn as_raw(&self) -> *mut sys::video::SDL_Window {
+        self.raw
+    }
 }
 
 // Very important: we need to clean up the window when we're done
