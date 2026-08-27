@@ -747,6 +747,76 @@ impl Device {
         }
     }
 
+    /// Resolve `file_name` (e.g. `"textured.vert"`) from embedded pipeline
+    /// output, preferring the first embedded backend format this device
+    /// supports. Returns `(code, format, reflection_json)`; everything is
+    /// `'static` because it was embedded at compile time.
+    fn resolve_stored(
+        &self,
+        stored: &crate::shader_assets::StoredShaders,
+        file_name: &str,
+    ) -> Result<(&'static [u8], SDL_GPUShaderFormat, &'static str), String> {
+        let formats = self.get_shader_formats();
+        for &(dir, format) in &stored.shaders {
+            if formats & format == SDL_GPUShaderFormat::INVALID {
+                continue;
+            }
+            let extension = if format == SDL_GPUShaderFormat::MSL {
+                "metal"
+            } else if format == SDL_GPUShaderFormat::SPIRV {
+                "spv"
+            } else {
+                "dxil"
+            };
+            let code = dir
+                .get_file(&format!("{file_name}.{extension}"))
+                .ok_or_else(|| format!("shader bytecode file not found: {file_name}"))?
+                .contents();
+            let reflection_json = std::str::from_utf8(
+                stored
+                    .json
+                    .get_file(&format!("{file_name}.json"))
+                    .ok_or_else(|| format!("shader metadata file not found: {file_name}"))?
+                    .contents(),
+            )
+            .map_err(|_| "shader metadata is not valid utf-8".to_string())?;
+            return Ok((code, format, reflection_json));
+        }
+        Err("no supported shader format".to_string())
+    }
+
+    /// Entry point name for embedded pipeline artifacts ("main0" is what
+    /// shadercross emits for MSL).
+    fn stored_entrypoint(format: SDL_GPUShaderFormat) -> &'static str {
+        if format == SDL_GPUShaderFormat::MSL {
+            "main0"
+        } else {
+            "main"
+        }
+    }
+
+    /// Create a shader from embedded pipeline output produced by sdl3_gs's
+    /// offline shader pipeline (see `sdl3_gs::shader_assets`).
+    ///
+    /// `stored` may be handed over directly as `&STORED_SHADERS` (or a local
+    /// `static STORED: LazyLock<StoredShaders>`); the first embedded format
+    /// this device supports wins (DXIL before SPIR-V on Windows).
+    pub fn load_stored_shader(
+        &self,
+        stored: &crate::shader_assets::StoredShaders,
+        file_name: &str,
+        stage: SDL_GPUShaderStage,
+    ) -> Result<Shader, String> {
+        let (code, format, json) = self.resolve_stored(stored, file_name)?;
+        self.create_shader(&ShaderCreateInfo {
+            code,
+            entrypoint: Self::stored_entrypoint(format),
+            format,
+            stage,
+            json,
+        })
+    }
+
     #[allow(deprecated)]
     pub fn create_graphics_pipeline(
         &self,
@@ -846,6 +916,22 @@ impl Device {
                 }),
             })
         }
+    }
+
+    /// Create a compute pipeline from embedded pipeline output. See
+    /// [`Device::load_stored_shader`] for resolution rules.
+    pub fn load_stored_compute_pipeline(
+        &self,
+        stored: &crate::shader_assets::StoredShaders,
+        file_name: &str,
+    ) -> Result<ComputePipeline, String> {
+        let (code, format, json) = self.resolve_stored(stored, file_name)?;
+        self.create_compute_pipeline(&ComputePipelineCreateInfo {
+            code,
+            entrypoint: Self::stored_entrypoint(format),
+            format,
+            json,
+        })
     }
 
     pub fn create_buffer(

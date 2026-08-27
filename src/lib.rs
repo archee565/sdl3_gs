@@ -1,9 +1,14 @@
 //#![allow(unused)]
+// Lets the `stored_shaders!` macro (which emits `::sdl3_gs::...` paths)
+// resolve when expanded inside this crate itself, e.g. `STORED_SHADERS`.
+extern crate self as sdl3_gs;
+
 pub mod callbacks;
 pub mod device;
 pub mod event;
 pub mod filesystem;
 pub mod properties;
+pub mod shader_assets;
 pub mod tools;
 pub mod window;
 
