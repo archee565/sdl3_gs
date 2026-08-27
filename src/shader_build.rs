@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -19,7 +18,20 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
     let msl_dir = output_dir.join("obj_msl");
     let json_dir = output_dir.join("obj_json");
 
-    println!("cargo:rerun-if-changed={}", shader_dir.display());
+    let mut watched = HashSet::<PathBuf>::new();
+    let mut watch = |path: &Path| {
+        if watched.insert(path.to_path_buf()) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    };
+
+    if shader_dir.is_dir() {
+        watch(shader_dir);
+    } else {
+        // Cargo reruns the build script on every build if a watched path is
+        // missing; watch the parent so an added shaders dir is still noticed.
+        watch(shader_dir.parent().unwrap_or(Path::new(".")));
+    }
 
     fs::create_dir_all(&spirv_dir).expect("Failed to create obj_spirv directory");
     if ENABLE_DXIL {
@@ -34,7 +46,7 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
     let (preprocessed, included_files) = preprocess_shaders(shader_dir, &pp_dir);
 
     for inc in &included_files {
-        println!("cargo:rerun-if-changed={}", inc.display());
+        watch(inc);
     }
 
     // Collect expected base names (e.g. "mesh_00.frag") from preprocessed files
@@ -66,9 +78,6 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
         }
     }
 
-    let shadercross_available = Command::new("shadercross").arg("--help").output().is_ok();
-
-    let warned_no_shadercross = AtomicBool::new(false);
     let warned_sources = Mutex::new(HashSet::<String>::new());
     preprocessed.par_iter().for_each(|(shader_file, newest_dep)| {
         let stem = shader_file.file_stem().unwrap().to_str().unwrap();
@@ -98,49 +107,23 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
             return;
         }
 
-        if !shadercross_available {
-            warned_no_shadercross
-                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                .ok();
-            let mut backends = Vec::new();
-            if ENABLE_DXIL {
-                backends.push("DXIL");
-            }
-            if ENABLE_MSL {
-                backends.push("MSL");
-            }
-            backends.push("JSON");
-            println!("cargo:warning=shadercross not found - {} conversion skipped", backends.join("/"));
-        }
-
         // Derive source file stem (e.g. "sim" from "sim_00.comp")
         let source_stem = stem.rsplit_once('_').map(|(s, _)| s).unwrap_or(stem);
         if warned_sources.lock().unwrap().insert(source_stem.to_string()) {
-            println!("cargo:warning=Converting shader: {}", source_stem);
+//            println!("cargo:warning=Converting shader: {}", source_stem);
         }
 
         compile_glsl_to_spirv(shader_file, &spv_path);
 
-        if shadercross_available {
-            let stage = match ext {
-                "vert" => "vertex",
-                "frag" => "fragment",
-                "comp" => "compute",
-                _ => "vertex",
-            };
-            let dxil_dir_ref = if ENABLE_DXIL { Some(dxil_dir.as_path()) } else { None };
-            let msl_dir_ref = if ENABLE_MSL { Some(msl_dir.as_path()) } else { None };
-            convert_spirv_to_formats(&spv_path, dxil_dir_ref, msl_dir_ref, &json_dir, &name, stage);
-        } else {
-            // Input changed but we can't regenerate — remove stale outputs
-            let _ = fs::remove_file(&json_path);
-            if let Some(ref p) = dxil_path {
-                let _ = fs::remove_file(p);
-            }
-            if let Some(ref p) = msl_path {
-                let _ = fs::remove_file(p);
-            }
-        }
+        let stage = match ext {
+            "vert" => shadercross::ShaderStage::Vertex,
+            "frag" => shadercross::ShaderStage::Fragment,
+            "comp" => shadercross::ShaderStage::Compute,
+            _ => shadercross::ShaderStage::Vertex,
+        };
+        let dxil_dir_ref = if ENABLE_DXIL { Some(dxil_dir.as_path()) } else { None };
+        let msl_dir_ref = if ENABLE_MSL { Some(msl_dir.as_path()) } else { None };
+        convert_spirv_to_formats(&spv_path, dxil_dir_ref, msl_dir_ref, &json_dir, &name, stage);
     });
 }
 
@@ -495,8 +478,6 @@ fn compile_glsl_to_spirv(input: &Path, output: &Path) {
 
     if let Ok(output_data) = result {
         if output_data.status.success() {
-            println!("cargo:rerun-if-changed={}", input.display());
-            println!("cargo:rerun-if-changed={}", output.display());
             return;
         }
         let stderr = String::from_utf8_lossy(&output_data.stderr);
@@ -517,8 +498,6 @@ fn compile_glsl_to_spirv(input: &Path, output: &Path) {
         Ok(output_data) => {
             if output_data.status.success() {
                 println!("cargo:warning=  -> SPIR-V");
-                println!("cargo:rerun-if-changed={}", input.display());
-                println!("cargo:rerun-if-changed={}", output.display());
                 return;
             }
             let stderr = String::from_utf8_lossy(&output_data.stderr);
@@ -539,40 +518,30 @@ fn convert_spirv_to_formats(
     msl_dir: Option<&Path>,
     json_dir: &Path,
     name: &str,
-    stage: &str,
+    stage: shadercross::ShaderStage,
 ) {
     let dxil_path = dxil_dir.map(|d| d.join(format!("{}.dxil", name)));
     let msl_path = msl_dir.map(|d| d.join(format!("{}.metal", name)));
     let json_path = json_dir.join(format!("{}.json", name));
 
+    let bytecode = fs::read(spv_path).unwrap_or_else(|e| panic!("Failed to read {}: {}", spv_path.display(), e));
+    let options = shadercross::Options::default();
+    let info = shadercross::SpirvInfo {
+        bytecode: &bytecode,
+        entrypoint: "main",
+        shader_stage: stage,
+        options: &options,
+    };
+
     // DXIL
     if let Some(ref dxil_path) = dxil_path {
-        let result = Command::new("shadercross")
-            .arg(spv_path)
-            .arg("-s")
-            .arg("SPIRV")
-            .arg("-d")
-            .arg("DXIL")
-            .arg("-t")
-            .arg(stage)
-            .arg("-o")
-            .arg(dxil_path)
-            .output();
-        match result {
-            Ok(o) if o.status.success() => {
-                println!("cargo:rerun-if-changed={}", dxil_path.display());
-            }
-            Ok(o) => {
-                eprintln!(
-                    "DXIL conversion failed for {}:\nstdout: {}\nstderr: {}",
-                    name,
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                panic!("Failed to convert {} to DXIL", name);
+        match shadercross::compile_dxil_from_spirv(&info) {
+            Ok(dxil) => {
+                fs::write(dxil_path, dxil)
+                    .unwrap_or_else(|e| panic!("Failed to write {}: {}", dxil_path.display(), e));
             }
             Err(e) => {
-                eprintln!("Failed to run shadercross for DXIL: {}", e);
+                eprintln!("DXIL conversion failed for {}: {}", name, e);
                 panic!("Failed to convert {} to DXIL", name);
             }
         }
@@ -580,65 +549,34 @@ fn convert_spirv_to_formats(
 
     // MSL
     if let Some(ref msl_path) = msl_path {
-        let result = Command::new("shadercross")
-            .arg(spv_path)
-            .arg("-s")
-            .arg("SPIRV")
-            .arg("-d")
-            .arg("MSL")
-            .arg("-t")
-            .arg(stage)
-            .arg("-o")
-            .arg(msl_path)
-            .output();
-        match result {
-            Ok(o) if o.status.success() => {
-                println!("cargo:rerun-if-changed={}", msl_path.display());
-            }
-            Ok(o) => {
-                eprintln!(
-                    "MSL conversion failed for {}:\nstdout: {}\nstderr: {}",
-                    name,
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
-                panic!("Failed to convert {} to MSL", name);
+        match shadercross::transpile_msl_from_spirv(&info) {
+            Ok(msl) => {
+                fs::write(msl_path, msl)
+                    .unwrap_or_else(|e| panic!("Failed to write {}: {}", msl_path.display(), e));
             }
             Err(e) => {
-                eprintln!("Failed to run shadercross for MSL: {}", e);
+                eprintln!("MSL conversion failed for {}: {}", name, e);
                 panic!("Failed to convert {} to MSL", name);
             }
         }
     }
 
     // JSON reflection
-    let result = Command::new("shadercross")
-        .arg(spv_path)
-        .arg("-s")
-        .arg("SPIRV")
-        .arg("-d")
-        .arg("JSON")
-        .arg("-t")
-        .arg(stage)
-        .arg("-o")
-        .arg(&json_path)
-        .output();
-    match result {
-        Ok(o) if o.status.success() => {
-            println!("cargo:rerun-if-changed={}", json_path.display());
-        }
-        Ok(o) => {
-            eprintln!(
-                "JSON reflection failed for {}:\nstdout: {}\nstderr: {}",
-                name,
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            panic!("Failed to generate reflection JSON for {}", name);
-        }
-        Err(e) => {
-            eprintln!("Failed to run shadercross for JSON: {}", e);
-            panic!("Failed to generate reflection JSON for {}", name);
-        }
-    }
+    let json = match stage {
+        shadercross::ShaderStage::Compute => match shadercross::reflect_compute_spirv(&bytecode) {
+            Ok(metadata) => shadercross::json::write_compute_reflect_json(&metadata),
+            Err(e) => {
+                eprintln!("JSON reflection failed for {}: {}", name, e);
+                panic!("Failed to generate reflection JSON for {}", name);
+            }
+        },
+        _ => match shadercross::reflect_graphics_spirv(&bytecode) {
+            Ok(metadata) => shadercross::json::write_graphics_reflect_json(&metadata),
+            Err(e) => {
+                eprintln!("JSON reflection failed for {}: {}", name, e);
+                panic!("Failed to generate reflection JSON for {}", name);
+            }
+        },
+    };
+    fs::write(&json_path, json).unwrap_or_else(|e| panic!("Failed to write {}: {}", json_path.display(), e));
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["proc_macros"]
+members = ["proc_macros", "rust_shadercross"]
 
 [package]
 name = "sdl3_gs"
@@ -18,7 +18,7 @@ link-static = ["sdl3-sys/link-static"]
 sdl-lean-and-mean = ["sdl3-sys/sdl-lean-and-mean"]
 link-framework = ["sdl3-sys/link-framework"]
 verbose = []
-shader-compiler = ["dep:rayon"]
+shader-compiler = ["dep:rayon", "dep:shadercross"]
 
 [dependencies]
 #sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
@@ -27,9 +27,11 @@ bytemuck = { version = "1.25", features = ["derive"] }
 log = "0.4"
 proc_macros = { path = "proc_macros" }
 rayon = { version = "1", optional = true }
+shadercross = { path = "rust_shadercross", optional = true }
 
 [build-dependencies]
 rayon = "1"
+shadercross = { path = "rust_shadercross" }
 
 [lib]
 name = "sdl3_gs"

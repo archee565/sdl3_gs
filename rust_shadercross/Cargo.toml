@@ -1,0 +1,20 @@
+[package]
+name = "shadercross"
+version = "3.0.0"
+edition = "2021"
+license = "Zlib"
+description = "Shader cross-compiler library and CLI for HLSL and SPIR-V, targeting SPIR-V, MSL, HLSL and DXIL"
+repository = "https://github.com/libsdl-org/SDL_shadercross"
+
+[lib]
+name = "shadercross"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shadercross"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
