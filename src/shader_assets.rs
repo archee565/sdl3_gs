@@ -28,12 +28,6 @@
 
 use crate::device::SDL_GPUShaderFormat;
 
-/// Lazily-initialized embedded shader assets built from this crate's own
-/// pipeline output: reflection JSON plus one entry per bytecode directory
-/// usable on the target platform, in preference order (e.g. DXIL before
-/// SPIR-V on Windows).
-pub static STORED_SHADERS: std::sync::LazyLock<StoredShaders> =
-    crate::stored_shaders!("target/shaders");
 
 /// One platform-supported bytecode directory and its shader format.
 pub type StoredBackend = (&'static EmbeddedDir, SDL_GPUShaderFormat);
