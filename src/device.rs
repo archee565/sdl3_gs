@@ -355,14 +355,20 @@ pub struct ShaderCreateInfo<'a> {
     pub format: SDL_GPUShaderFormat,
     /// The stage the shader program corresponds to.
     pub stage: SDL_GPUShaderStage,
-    /// The number of samplers defined in the shader.
-    pub num_samplers: u32,
-    /// The number of storage textures defined in the shader.
-    pub num_storage_textures: u32,
-    /// The number of storage buffers defined in the shader.
-    pub num_storage_buffers: u32,
-    /// The number of uniform buffers defined in the shader.
-    pub num_uniform_buffers: u32,
+    /// The shadercross reflection JSON for the shader, used to determine the
+    /// number of samplers, storage textures/buffers, and uniform buffers.
+    pub json: &'a str,
+}
+
+fn parse_json_u32(json: &str, key: &str) -> u32 {
+    let needle = format!("\"{key}\":");
+    json.find(&needle)
+        .and_then(|i| {
+            let trimmed = json[i + needle.len()..].trim_start();
+            let end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(trimmed.len());
+            trimmed[..end].parse::<u32>().ok()
+        })
+        .unwrap_or(0)
 }
 
 struct DeviceInner {
@@ -721,10 +727,10 @@ impl Device {
             entrypoint: entrypoint.as_ptr(),
             format: info.format,
             stage: info.stage,
-            num_samplers: info.num_samplers,
-            num_storage_textures: info.num_storage_textures,
-            num_storage_buffers: info.num_storage_buffers,
-            num_uniform_buffers: info.num_uniform_buffers,
+            num_samplers: parse_json_u32(info.json, "samplers"),
+            num_storage_textures: parse_json_u32(info.json, "storage_textures"),
+            num_storage_buffers: parse_json_u32(info.json, "storage_buffers"),
+            num_uniform_buffers: parse_json_u32(info.json, "uniform_buffers"),
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
@@ -806,20 +812,23 @@ impl Device {
     ) -> Result<ComputePipeline, String> {
         let entrypoint = std::ffi::CString::new(info.entrypoint)
             .map_err(|_| String::from("entrypoint contains interior nul byte"))?;
+        let threadcount_x = parse_json_u32(info.json, "threadcount_x");
+        let threadcount_y = parse_json_u32(info.json, "threadcount_y");
+        let threadcount_z = parse_json_u32(info.json, "threadcount_z");
         let raw_info = gpu::SDL_GPUComputePipelineCreateInfo {
             code_size: info.code.len(),
             code: info.code.as_ptr(),
             entrypoint: entrypoint.as_ptr(),
             format: info.format,
-            num_samplers: info.num_samplers,
-            num_readonly_storage_textures: info.num_readonly_storage_textures,
-            num_readonly_storage_buffers: info.num_readonly_storage_buffers,
-            num_readwrite_storage_textures: info.num_readwrite_storage_textures,
-            num_readwrite_storage_buffers: info.num_readwrite_storage_buffers,
-            num_uniform_buffers: info.num_uniform_buffers,
-            threadcount_x: info.threadcount_x,
-            threadcount_y: info.threadcount_y,
-            threadcount_z: info.threadcount_z,
+            num_samplers: parse_json_u32(info.json, "samplers"),
+            num_readonly_storage_textures: parse_json_u32(info.json, "readonly_storage_textures"),
+            num_readonly_storage_buffers: parse_json_u32(info.json, "readonly_storage_buffers"),
+            num_readwrite_storage_textures: parse_json_u32(info.json, "readwrite_storage_textures"),
+            num_readwrite_storage_buffers: parse_json_u32(info.json, "readwrite_storage_buffers"),
+            num_uniform_buffers: parse_json_u32(info.json, "uniform_buffers"),
+            threadcount_x,
+            threadcount_y,
+            threadcount_z,
             props: sys::properties::SDL_PropertiesID(0),
         };
         unsafe {
@@ -831,6 +840,9 @@ impl Device {
                 inner: Rc::new(ComputePipelineData {
                     raw,
                     device: Rc::downgrade(&self.inner),
+                    threadcount_x,
+                    threadcount_y,
+                    threadcount_z,
                 }),
             })
         }
@@ -1149,6 +1161,9 @@ impl Drop for GraphicsPipelineData {
 pub(crate) struct ComputePipelineData {
     pub(crate) raw: *mut gpu::SDL_GPUComputePipeline,
     device: Weak<DeviceInner>,
+    threadcount_x: u32,
+    threadcount_y: u32,
+    threadcount_z: u32,
 }
 
 impl Drop for ComputePipelineData {
@@ -1422,8 +1437,14 @@ impl GraphicsPipeline {
 }
 
 thread_local! {
-    static NONE_COMPUTE_PIPELINE: ComputePipeline = ComputePipeline {
-        inner: Rc::new(ComputePipelineData { raw: std::ptr::null_mut(), device: Weak::new() }),
+        static NONE_COMPUTE_PIPELINE: ComputePipeline = ComputePipeline {
+        inner: Rc::new(ComputePipelineData {
+            raw: std::ptr::null_mut(),
+            device: Weak::new(),
+            threadcount_x: 0,
+            threadcount_y: 0,
+            threadcount_z: 0,
+        }),
     };
 }
 
@@ -1472,6 +1493,12 @@ impl ComputePipeline {
 
     pub fn raw(&self) -> *mut gpu::SDL_GPUComputePipeline {
         self.inner.raw
+    }
+
+    /// The workgroup thread counts declared by the compute shader, parsed from
+    /// its shadercross reflection JSON.
+    pub fn threadcount(&self) -> (u32, u32, u32) {
+        (self.inner.threadcount_x, self.inner.threadcount_y, self.inner.threadcount_z)
     }
 }
 
@@ -1777,24 +1804,10 @@ pub struct ComputePipelineCreateInfo<'a> {
     pub entrypoint: &'a str,
     /// The format of the shader code.
     pub format: SDL_GPUShaderFormat,
-    /// The number of samplers defined in the shader.
-    pub num_samplers: u32,
-    /// The number of readonly storage textures defined in the shader.
-    pub num_readonly_storage_textures: u32,
-    /// The number of readonly storage buffers defined in the shader.
-    pub num_readonly_storage_buffers: u32,
-    /// The number of read-write storage textures defined in the shader.
-    pub num_readwrite_storage_textures: u32,
-    /// The number of read-write storage buffers defined in the shader.
-    pub num_readwrite_storage_buffers: u32,
-    /// The number of uniform buffers defined in the shader.
-    pub num_uniform_buffers: u32,
-    /// The number of threads in the X dimension of the workgroup.
-    pub threadcount_x: u32,
-    /// The number of threads in the Y dimension of the workgroup.
-    pub threadcount_y: u32,
-    /// The number of threads in the Z dimension of the workgroup.
-    pub threadcount_z: u32,
+    /// The shadercross reflection JSON for the shader, used to determine the
+    /// number of samplers, storage textures/buffers, uniform buffers, and the
+    /// workgroup thread counts.
+    pub json: &'a str,
 }
 
 /// A read-write storage buffer binding for a compute pass.

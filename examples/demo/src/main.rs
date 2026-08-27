@@ -115,10 +115,7 @@ impl Renderer {
                 entrypoint: "main",
                 format: SDL_GPUShaderFormat::SPIRV,
                 stage: SDL_GPUShaderStage::VERTEX,
-                num_samplers: 0,
-                num_storage_textures: 0,
-                num_storage_buffers: 0,
-                num_uniform_buffers: 0,
+                json: r#"{"samplers":0,"storage_textures":0,"storage_buffers":0,"uniform_buffers":0}"#,
             })
             .expect("Failed to create vertex shader");
 
@@ -128,10 +125,7 @@ impl Renderer {
                 entrypoint: "main",
                 format: SDL_GPUShaderFormat::SPIRV,
                 stage: SDL_GPUShaderStage::FRAGMENT,
-                num_samplers: 1,
-                num_storage_textures: 0,
-                num_storage_buffers: 0,
-                num_uniform_buffers: 1,
+                json: r#"{"samplers":1,"storage_textures":0,"storage_buffers":0,"uniform_buffers":1}"#,
             })
             .expect("Failed to create fragment shader");
 
@@ -218,7 +212,7 @@ impl Renderer {
             .expect("Failed to create checkerboard texture");
 
         checkerboard_texture
-            .upload(&pixels)
+            .upload(None, &pixels)
             .expect("Failed to upload checkerboard data");
 
         // Sampler
@@ -324,15 +318,7 @@ fn run_compute_fill(device: &Device) {
             code: include_bytes!("fill_array.comp.spv"),
             entrypoint: "main",
             format: SDL_GPUShaderFormat::SPIRV,
-            num_samplers: 0,
-            num_readonly_storage_textures: 0,
-            num_readonly_storage_buffers: 0,
-            num_readwrite_storage_textures: 0,
-            num_readwrite_storage_buffers: 1,
-            num_uniform_buffers: 0,
-            threadcount_x: 64,
-            threadcount_y: 1,
-            threadcount_z: 1,
+            json: r#"{"samplers":0,"readonly_storage_textures":0,"readonly_storage_buffers":0,"readwrite_storage_textures":0,"readwrite_storage_buffers":1,"uniform_buffers":0,"threadcount_x":64,"threadcount_y":1,"threadcount_z":1}"#,
         })
         .expect("Failed to create compute pipeline");
 
@@ -363,7 +349,7 @@ fn run_compute_fill(device: &Device) {
         .expect("Failed to submit compute command buffer");
 
     let data = buffer
-        .download_raw(0, 0)
+        .download_vecu8(0, 0)
         .expect("Failed to download buffer");
     let values: &[u32] = bytemuck::cast_slice(&data);
 

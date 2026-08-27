@@ -7,6 +7,9 @@ pub mod properties;
 pub mod tools;
 pub mod window;
 
+#[cfg(feature = "shader-compiler")]
+pub mod shader_build;
+
 pub use sdl3_sys as sys;
 
 pub use sdl3_sys::init::*;
