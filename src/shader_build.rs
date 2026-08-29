@@ -6,12 +6,12 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-const ENABLE_MSL: bool = true;
-const ENABLE_DXIL: bool = true;
-
 /// Compile all GLSL shaders found under `shader_dir`, writing preprocessed
 /// variants and compiled outputs into `output_dir` (e.g. `target/shaders`).
-pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
+///
+/// `enable_dxil` / `enable_msl` toggle the optional DXIL and MSL backends;
+/// SPIR-V and reflection JSON are always produced.
+pub fn compile_shaders(shader_dir: &Path, output_dir: &Path, enable_dxil: bool, enable_msl: bool) {
     let pp_dir = output_dir.join("preprocessed");
     let spirv_dir = output_dir.join("obj_spirv");
     let dxil_dir = output_dir.join("obj_dxil");
@@ -34,10 +34,10 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
     }
 
     fs::create_dir_all(&spirv_dir).expect("Failed to create obj_spirv directory");
-    if ENABLE_DXIL {
+    if enable_dxil {
         fs::create_dir_all(&dxil_dir).expect("Failed to create obj_dxil directory");
     }
-    if ENABLE_MSL {
+    if enable_msl {
         fs::create_dir_all(&msl_dir).expect("Failed to create obj_msl directory");
     }
     fs::create_dir_all(&json_dir).expect("Failed to create obj_json directory");
@@ -57,10 +57,10 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
 
     // Remove stale outputs that no longer correspond to any preprocessed shader
     let mut output_dirs: Vec<(&Path, &str)> = vec![(&spirv_dir, "spv"), (&json_dir, "json")];
-    if ENABLE_DXIL {
+    if enable_dxil {
         output_dirs.push((&dxil_dir, "dxil"));
     }
-    if ENABLE_MSL {
+    if enable_msl {
         output_dirs.push((&msl_dir, "metal"));
     }
     for &(dir, ext) in &output_dirs {
@@ -84,12 +84,12 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
         let ext = shader_file.extension().unwrap().to_str().unwrap();
         let name = format!("{}.{}", stem, ext);
         let spv_path = spirv_dir.join(format!("{}.spv", name));
-        let dxil_path = if ENABLE_DXIL {
+        let dxil_path = if enable_dxil {
             Some(dxil_dir.join(format!("{}.dxil", name)))
         } else {
             None
         };
-        let msl_path = if ENABLE_MSL {
+        let msl_path = if enable_msl {
             Some(msl_dir.join(format!("{}.metal", name)))
         } else {
             None
@@ -121,8 +121,8 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path) {
             "comp" => shadercross::ShaderStage::Compute,
             _ => shadercross::ShaderStage::Vertex,
         };
-        let dxil_dir_ref = if ENABLE_DXIL { Some(dxil_dir.as_path()) } else { None };
-        let msl_dir_ref = if ENABLE_MSL { Some(msl_dir.as_path()) } else { None };
+        let dxil_dir_ref = if enable_dxil { Some(dxil_dir.as_path()) } else { None };
+        let msl_dir_ref = if enable_msl { Some(msl_dir.as_path()) } else { None };
         convert_spirv_to_formats(&spv_path, dxil_dir_ref, msl_dir_ref, &json_dir, &name, stage);
     });
 }

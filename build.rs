@@ -8,5 +8,7 @@ fn main() {
     shader_build::compile_shaders(
         &manifest_dir.join("src").join("shaders"),
         &manifest_dir.join("target").join("shaders"),
+        true, // DXIL
+        true, // MSL
     );
 }
