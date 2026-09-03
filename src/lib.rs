@@ -7,6 +7,7 @@ pub mod callbacks;
 pub mod device;
 pub mod event;
 pub mod filesystem;
+pub mod logging;
 pub mod properties;
 pub mod shader_assets;
 pub mod tools;

@@ -37,7 +37,10 @@ impl Parse for ShaderRoot {
 fn expand_stored_shaders(input: TokenStream) -> syn::Result<TokenStream> {
     let root = syn::parse::<ShaderRoot>(input)?.0;
     let manifest = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
-        syn::Error::new(root.span(), "CARGO_MANIFEST_DIR is not set; run through cargo")
+        syn::Error::new(
+            root.span(),
+            "CARGO_MANIFEST_DIR is not set; run through cargo",
+        )
     })?;
     let base = Path::new(&manifest).join(root.value());
     if !base.is_dir() {
@@ -62,15 +65,23 @@ fn expand_stored_shaders(input: TokenStream) -> syn::Result<TokenStream> {
     // init closure declares each tuple's tokens as an `EmbeddedDir` const
     // and pushes it.
     let windows_backends: Vec<(ShaderKind, proc_macro2::TokenStream)> = vec![
-        (ShaderKind::Dxil, embed_dir(&base.join("obj_dxil"), "obj_dxil")),
-        (ShaderKind::Spv, embed_dir(&base.join("obj_spirv"), "obj_spirv")),
+        (
+            ShaderKind::Dxil,
+            embed_dir(&base.join("obj_dxil"), "obj_dxil"),
+        ),
+        (
+            ShaderKind::Spv,
+            embed_dir(&base.join("obj_spirv"), "obj_spirv"),
+        ),
     ];
 
     let apple_backends: Vec<(ShaderKind, proc_macro2::TokenStream)> =
         vec![(ShaderKind::Msl, embed_dir(&base.join("obj_msl"), "obj_msl"))];
 
-    let other_backends: Vec<(ShaderKind, proc_macro2::TokenStream)> =
-        vec![(ShaderKind::Spv, embed_dir(&base.join("obj_spirv"), "obj_spirv"))];
+    let other_backends: Vec<(ShaderKind, proc_macro2::TokenStream)> = vec![(
+        ShaderKind::Spv,
+        embed_dir(&base.join("obj_spirv"), "obj_spirv"),
+    )];
 
     let platforms: [(&str, &[(ShaderKind, proc_macro2::TokenStream)]); 3] = [
         ("target_os = \"windows\"", &windows_backends),

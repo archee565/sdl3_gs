@@ -52,7 +52,13 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path, enable_dxil: bool, 
     // Collect expected base names (e.g. "mesh_00.frag") from preprocessed files
     let expected_names: Vec<String> = preprocessed
         .iter()
-        .map(|(p, _)| format!("{}.{}", p.file_stem().unwrap().to_str().unwrap(), p.extension().unwrap().to_str().unwrap()))
+        .map(|(p, _)| {
+            format!(
+                "{}.{}",
+                p.file_stem().unwrap().to_str().unwrap(),
+                p.extension().unwrap().to_str().unwrap()
+            )
+        })
         .collect();
 
     // Remove stale outputs that no longer correspond to any preprocessed shader
@@ -79,52 +85,73 @@ pub fn compile_shaders(shader_dir: &Path, output_dir: &Path, enable_dxil: bool, 
     }
 
     let warned_sources = Mutex::new(HashSet::<String>::new());
-    preprocessed.par_iter().for_each(|(shader_file, newest_dep)| {
-        let stem = shader_file.file_stem().unwrap().to_str().unwrap();
-        let ext = shader_file.extension().unwrap().to_str().unwrap();
-        let name = format!("{}.{}", stem, ext);
-        let spv_path = spirv_dir.join(format!("{}.spv", name));
-        let dxil_path = if enable_dxil {
-            Some(dxil_dir.join(format!("{}.dxil", name)))
-        } else {
-            None
-        };
-        let msl_path = if enable_msl {
-            Some(msl_dir.join(format!("{}.metal", name)))
-        } else {
-            None
-        };
-        let json_path = json_dir.join(format!("{}.json", name));
+    preprocessed
+        .par_iter()
+        .for_each(|(shader_file, newest_dep)| {
+            let stem = shader_file.file_stem().unwrap().to_str().unwrap();
+            let ext = shader_file.extension().unwrap().to_str().unwrap();
+            let name = format!("{}.{}", stem, ext);
+            let spv_path = spirv_dir.join(format!("{}.spv", name));
+            let dxil_path = if enable_dxil {
+                Some(dxil_dir.join(format!("{}.dxil", name)))
+            } else {
+                None
+            };
+            let msl_path = if enable_msl {
+                Some(msl_dir.join(format!("{}.metal", name)))
+            } else {
+                None
+            };
+            let json_path = json_dir.join(format!("{}.json", name));
 
-        let mut outputs: Vec<PathBuf> = vec![spv_path.clone(), json_path.clone()];
-        if let Some(ref p) = dxil_path {
-            outputs.push(p.clone());
-        }
-        if let Some(ref p) = msl_path {
-            outputs.push(p.clone());
-        }
-        if outputs_up_to_date(*newest_dep, &outputs) {
-            return;
-        }
+            let mut outputs: Vec<PathBuf> = vec![spv_path.clone(), json_path.clone()];
+            if let Some(ref p) = dxil_path {
+                outputs.push(p.clone());
+            }
+            if let Some(ref p) = msl_path {
+                outputs.push(p.clone());
+            }
+            if outputs_up_to_date(*newest_dep, &outputs) {
+                return;
+            }
 
-        // Derive source file stem (e.g. "sim" from "sim_00.comp")
-        let source_stem = stem.rsplit_once('_').map(|(s, _)| s).unwrap_or(stem);
-        if warned_sources.lock().unwrap().insert(source_stem.to_string()) {
-//            println!("cargo:warning=Converting shader: {}", source_stem);
-        }
+            // Derive source file stem (e.g. "sim" from "sim_00.comp")
+            let source_stem = stem.rsplit_once('_').map(|(s, _)| s).unwrap_or(stem);
+            if warned_sources
+                .lock()
+                .unwrap()
+                .insert(source_stem.to_string())
+            {
+                //            println!("cargo:warning=Converting shader: {}", source_stem);
+            }
 
-        compile_glsl_to_spirv(shader_file, &spv_path);
+            compile_glsl_to_spirv(shader_file, &spv_path);
 
-        let stage = match ext {
-            "vert" => shadercross::ShaderStage::Vertex,
-            "frag" => shadercross::ShaderStage::Fragment,
-            "comp" => shadercross::ShaderStage::Compute,
-            _ => shadercross::ShaderStage::Vertex,
-        };
-        let dxil_dir_ref = if enable_dxil { Some(dxil_dir.as_path()) } else { None };
-        let msl_dir_ref = if enable_msl { Some(msl_dir.as_path()) } else { None };
-        convert_spirv_to_formats(&spv_path, dxil_dir_ref, msl_dir_ref, &json_dir, &name, stage);
-    });
+            let stage = match ext {
+                "vert" => shadercross::ShaderStage::Vertex,
+                "frag" => shadercross::ShaderStage::Fragment,
+                "comp" => shadercross::ShaderStage::Compute,
+                _ => shadercross::ShaderStage::Vertex,
+            };
+            let dxil_dir_ref = if enable_dxil {
+                Some(dxil_dir.as_path())
+            } else {
+                None
+            };
+            let msl_dir_ref = if enable_msl {
+                Some(msl_dir.as_path())
+            } else {
+                None
+            };
+            convert_spirv_to_formats(
+                &spv_path,
+                dxil_dir_ref,
+                msl_dir_ref,
+                &json_dir,
+                &name,
+                stage,
+            );
+        });
 }
 
 // -- Shader preprocessing ----------------------------------------------------
@@ -185,7 +212,11 @@ fn strip_comments(source: &str) -> String {
 /// Recursively resolve `#include "path"` directives in `source`, replacing each
 /// with the contents of the referenced file (relative to `shader_dir`).
 /// Returns the fully-resolved source and a list of all included file paths.
-fn resolve_includes(source: &str, shader_dir: &Path, visited: &mut HashSet<PathBuf>) -> (String, Vec<PathBuf>) {
+fn resolve_includes(
+    source: &str,
+    shader_dir: &Path,
+    visited: &mut HashSet<PathBuf>,
+) -> (String, Vec<PathBuf>) {
     let mut out = String::with_capacity(source.len());
     let mut included = Vec::new();
 
@@ -241,8 +272,12 @@ fn find_entry_points(source: &str) -> Vec<EntryPoint> {
             if &bytes[i..i + tag_len] == *prefix {
                 let d = &bytes[i + tag_len..i + tag_len + 3];
                 if d[0].is_ascii_digit() && d[1].is_ascii_digit() && d[2] == b'(' {
-                    let name =
-                        format!("{}{}{}", std::str::from_utf8(&prefix[5..]).unwrap(), d[0] as char, d[1] as char);
+                    let name = format!(
+                        "{}{}{}",
+                        std::str::from_utf8(&prefix[5..]).unwrap(),
+                        d[0] as char,
+                        d[1] as char
+                    );
                     if let Some(br) = source[i..].find('{') {
                         let brace = i + br;
                         let mut depth = 1usize;
@@ -256,7 +291,11 @@ fn find_entry_points(source: &str) -> Vec<EntryPoint> {
                             j += 1;
                         }
                         if depth == 0 {
-                            entries.push(EntryPoint { name, start: i, end: j });
+                            entries.push(EntryPoint {
+                                name,
+                                start: i,
+                                end: j,
+                            });
                             i = j;
                             break;
                         }
@@ -339,7 +378,10 @@ fn generate_variant(source: &str, entry_name: &str, entries: &[EntryPoint]) -> S
 
     for ep in entries {
         let line_start = source[..ep.start].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_end = source[ep.end..].find('\n').map(|p| ep.end + p + 1).unwrap_or(source.len());
+        let line_end = source[ep.end..]
+            .find('\n')
+            .map(|p| ep.end + p + 1)
+            .unwrap_or(source.len());
 
         if ep.name == entry_name {
             out.push_str(&source[cursor..ep.start]);
@@ -364,7 +406,10 @@ fn generate_variant(source: &str, entry_name: &str, entries: &[EntryPoint]) -> S
 
 /// Read GLSL shaders from `shader_dir`, split multi-entry files into per-entry
 /// variants, and write them into `out_dir/`.
-fn preprocess_shaders(shader_dir: &Path, out_dir: &Path) -> (Vec<(PathBuf, SystemTime)>, Vec<PathBuf>) {
+fn preprocess_shaders(
+    shader_dir: &Path,
+    out_dir: &Path,
+) -> (Vec<(PathBuf, SystemTime)>, Vec<PathBuf>) {
     let pp = out_dir;
     fs::create_dir_all(pp).expect("failed to create preprocessed/");
 
@@ -389,7 +434,10 @@ fn preprocess_shaders(shader_dir: &Path, out_dir: &Path) -> (Vec<(PathBuf, Syste
         let stem = src_path.file_stem().unwrap().to_str().unwrap();
 
         let src_relative = src_path.file_name().unwrap().to_str().unwrap();
-        let header = format!("// AUTO-GENERATED FILE — do not edit manually.\n// Source: {}\n\n", src_relative);
+        let header = format!(
+            "// AUTO-GENERATED FILE — do not edit manually.\n// Source: {}\n\n",
+            src_relative
+        );
 
         if entries.is_empty() {
             let dest = pp.join(src_path.file_name().unwrap());
@@ -482,7 +530,10 @@ fn compile_glsl_to_spirv(input: &Path, output: &Path) {
         }
         let stderr = String::from_utf8_lossy(&output_data.stderr);
         let stdout = String::from_utf8_lossy(&output_data.stdout);
-        eprintln!("glslc failed for {}:\nstdout: {}\nstderr: {}", stem, stdout, stderr);
+        eprintln!(
+            "glslc failed for {}:\nstdout: {}\nstderr: {}",
+            stem, stdout, stderr
+        );
     }
 
     let result = Command::new("glslcc")
@@ -502,7 +553,10 @@ fn compile_glsl_to_spirv(input: &Path, output: &Path) {
             }
             let stderr = String::from_utf8_lossy(&output_data.stderr);
             let stdout = String::from_utf8_lossy(&output_data.stdout);
-            eprintln!("glslcc failed for {}:\nstdout: {}\nstderr: {}", stem, stdout, stderr);
+            eprintln!(
+                "glslcc failed for {}:\nstdout: {}\nstderr: {}",
+                stem, stdout, stderr
+            );
             panic!("Failed to compile shader {}", stem);
         }
         Err(e) => {
@@ -524,7 +578,8 @@ fn convert_spirv_to_formats(
     let msl_path = msl_dir.map(|d| d.join(format!("{}.metal", name)));
     let json_path = json_dir.join(format!("{}.json", name));
 
-    let bytecode = fs::read(spv_path).unwrap_or_else(|e| panic!("Failed to read {}: {}", spv_path.display(), e));
+    let bytecode = fs::read(spv_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", spv_path.display(), e));
     let options = shadercross::Options::default();
     let info = shadercross::SpirvInfo {
         bytecode: &bytecode,
@@ -578,5 +633,6 @@ fn convert_spirv_to_formats(
             }
         },
     };
-    fs::write(&json_path, json).unwrap_or_else(|e| panic!("Failed to write {}: {}", json_path.display(), e));
+    fs::write(&json_path, json)
+        .unwrap_or_else(|e| panic!("Failed to write {}: {}", json_path.display(), e));
 }

@@ -365,7 +365,9 @@ fn parse_json_u32(json: &str, key: &str) -> u32 {
     json.find(&needle)
         .and_then(|i| {
             let trimmed = json[i + needle.len()..].trim_start();
-            let end = trimmed.find(|c: char| !c.is_ascii_digit()).unwrap_or(trimmed.len());
+            let end = trimmed
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(trimmed.len());
             trimmed[..end].parse::<u32>().ok()
         })
         .unwrap_or(0)
@@ -376,7 +378,6 @@ struct DeviceInner {
     upload_transfer_buffer: RefCell<GPUTransferBuffer>,
     window: Option<Rc<crate::window::Window>>,
 }
-
 
 pub struct Device {
     inner: Rc<DeviceInner>,
@@ -471,10 +472,7 @@ impl Device {
         }
     }
 
-    fn submit_upload(
-        &self,
-        record: impl FnOnce(*mut gpu::SDL_GPUCopyPass),
-    ) -> Result<(), String> {
+    fn submit_upload(&self, record: impl FnOnce(*mut gpu::SDL_GPUCopyPass)) -> Result<(), String> {
         let cmd = self.acquire_command_buffer()?;
         let pass = unsafe {
             let raw = gpu::SDL_BeginGPUCopyPass(cmd.inner);
@@ -1380,7 +1378,6 @@ impl Texture {
             })
         }
     }
-
 }
 
 impl Default for Texture {
@@ -1584,7 +1581,11 @@ impl ComputePipeline {
     /// The workgroup thread counts declared by the compute shader, parsed from
     /// its shadercross reflection JSON.
     pub fn threadcount(&self) -> (u32, u32, u32) {
-        (self.inner.threadcount_x, self.inner.threadcount_y, self.inner.threadcount_z)
+        (
+            self.inner.threadcount_x,
+            self.inner.threadcount_y,
+            self.inner.threadcount_z,
+        )
     }
 }
 

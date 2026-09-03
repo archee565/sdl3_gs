@@ -24,6 +24,7 @@ shader-compiler = ["dep:rayon", "dep:shadercross"]
 #sdl3-sys = { path="/home/peter/git/sdl3-sys-rs/sdl3-sys"   }
 sdl3-sys = { version = "0.6" }
 bytemuck = { version = "1.25", features = ["derive"] }
+env_filter = "0.1"
 log = "0.4"
 proc_macros = { path = "proc_macros" }
 rayon = { version = "1", optional = true }
@@ -40,3 +41,6 @@ path = "src/lib.rs"
 [[example]]
 name = "demo"
 path = "examples/demo/src/main.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15"

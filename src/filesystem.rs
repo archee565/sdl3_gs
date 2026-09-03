@@ -6,7 +6,11 @@ fn cstr_to_string(ptr: *const core::ffi::c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+    Some(
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 /// Get the directory where the application was run from.

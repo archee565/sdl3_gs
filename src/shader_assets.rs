@@ -28,7 +28,6 @@
 
 use crate::device::SDL_GPUShaderFormat;
 
-
 /// One platform-supported bytecode directory and its shader format.
 pub type StoredBackend = (&'static EmbeddedDir, SDL_GPUShaderFormat);
 
