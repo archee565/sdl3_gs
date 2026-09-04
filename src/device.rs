@@ -1846,12 +1846,6 @@ impl Sampler {
     }
 }
 
-/// A texture+sampler pair for binding to a shader slot.
-pub struct TextureSamplerBinding<'a> {
-    pub texture: &'a Texture,
-    pub sampler: &'a Sampler,
-}
-
 pub struct GPUBufferBinding<'a> {
     /// The buffer to bind.
     pub buffer: &'a GPUBuffer,
@@ -2265,15 +2259,15 @@ impl RenderPass<'_> {
         }
     }
 
-    pub fn bind_fragment_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding<'_>]) {
+    pub fn bind_fragment_samplers(&self, first_slot: u32, bindings: &[(&Texture, &Sampler)]) {
         let raw_bindings: Vec<gpu::SDL_GPUTextureSamplerBinding> = bindings
             .iter()
             .map(|b| {
-                assert!(b.texture.is_valid());
-                assert!(b.sampler.is_valid());
+                assert!(b.0.is_valid());
+                assert!(b.1.is_valid());
                 gpu::SDL_GPUTextureSamplerBinding {
-                    texture: b.texture.raw(),
-                    sampler: b.sampler.raw(),
+                    texture: b.0.raw(),
+                    sampler: b.1.raw(),
                 }
             })
             .collect();
@@ -2469,12 +2463,12 @@ impl ComputePass<'_> {
         }
     }
 
-    pub fn bind_samplers(&self, first_slot: u32, bindings: &[TextureSamplerBinding<'_>]) {
+    pub fn bind_samplers(&self, first_slot: u32, bindings: &[(&Texture, &Sampler)]) {
         let raw_bindings: Vec<gpu::SDL_GPUTextureSamplerBinding> = bindings
             .iter()
             .map(|b| gpu::SDL_GPUTextureSamplerBinding {
-                texture: b.texture.raw(),
-                sampler: b.sampler.raw(),
+                texture: b.0.raw(),
+                sampler: b.1.raw(),
             })
             .collect();
         unsafe {
