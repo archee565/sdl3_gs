@@ -681,6 +681,10 @@ impl Device {
                 inner: Rc::new(TextureData {
                     raw,
                     res: (info.width, info.height),
+                    num_levels: info.num_levels,
+                    num_layers: info.layer_count_or_depth,
+                    depth: info.layer_count_or_depth,
+                    is_3d: info.r#type == gpu::SDL_GPUTextureType::_3D,
                     device: Rc::downgrade(&self.inner),
                     kind: Cell::new(TextureKind::Regular),
                 }),
@@ -1181,6 +1185,10 @@ pub(crate) enum TextureKind {
 pub(crate) struct TextureData {
     pub(crate) raw: *mut gpu::SDL_GPUTexture,
     pub(crate) res: (u32, u32),
+    pub(crate) num_levels: u32,
+    pub(crate) num_layers: u32,
+    pub(crate) depth: u32,
+    pub(crate) is_3d: bool,
     device: Weak<DeviceInner>,
     pub(crate) kind: Cell<TextureKind>,
 }
@@ -1392,6 +1400,10 @@ impl Texture {
             inner: Rc::new(TextureData {
                 raw: std::ptr::null_mut(),
                 res: (0, 0),
+                num_levels: 1,
+                num_layers: 1,
+                depth: 1,
+                is_3d: false,
                 device: Weak::new(),
                 kind: Cell::new(TextureKind::None),
             }),
@@ -1408,6 +1420,11 @@ impl Texture {
 
     pub fn res(&self) -> (u32, u32) {
         self.inner.res
+    }
+
+    /// The number of mip levels the texture was created with.
+    pub fn num_levels(&self) -> u32 {
+        self.inner.num_levels
     }
 }
 
@@ -1951,6 +1968,10 @@ impl CommandBuffer {
             inner: Rc::new(TextureData {
                 raw: texture,
                 res: (width, height),
+                num_levels: 1,
+                num_layers: 1,
+                depth: 1,
+                is_3d: false,
                 device: Weak::new(),
                 kind: Cell::new(TextureKind::Swapchain),
             }),
@@ -1992,6 +2013,10 @@ impl CommandBuffer {
             inner: Rc::new(TextureData {
                 raw: texture,
                 res: (width, height),
+                num_levels: 1,
+                num_layers: 1,
+                depth: 1,
+                is_3d: false,
                 device: Weak::new(),
                 kind: Cell::new(TextureKind::Swapchain),
             }),
@@ -2044,10 +2069,86 @@ impl CommandBuffer {
 
     /// Generate all mip levels for a texture from its base level.
     /// Must not be called inside any pass.
+    ///
+    /// Unlike `SDL_GenerateMipmapsForGPUTexture`, each mip level is produced by
+    /// a bilinearly-filtered blit whose *source region is exactly double the
+    /// destination region's pixel coordinates and size*. The 2x2 source pixels
+    /// contributing to one destination pixel are therefore always the aligned
+    /// pixel quad — exactly 4 pixels make up one new pixel, with no
+    /// half-pixel offset at region borders.
+    ///
+    /// The texture must have been created with `SDL_GPUTextureUsageFlags`
+    /// including both `SAMPLER` and `COLOR_TARGET` (required by blitting).
     pub fn generate_mipmaps(&mut self, texture: &Texture) {
-        unsafe {
-            gpu::SDL_GenerateMipmapsForGPUTexture(self.inner, texture.raw());
+        assert!(
+            texture.is_valid(),
+            "generate_mipmaps: invalid (null) texture"
+        );
+        let d = &texture.inner;
+        if d.num_levels <= 1 {
+            return;
         }
+        let (mut w, mut h) = d.res;
+        if d.is_3d {
+            for level in 1..d.num_levels {
+                let dw = (w >> 1).max(1);
+                let dh = (h >> 1).max(1);
+                let dd = (d.depth >> level).max(1);
+                for plane in 0..dd {
+                    self.blit_level(texture, level - 1, plane, dw, dh);
+                }
+                w = dw;
+                h = dh;
+            }
+        } else {
+            for level in 1..d.num_levels {
+                let dw = (w >> 1).max(1);
+                let dh = (h >> 1).max(1);
+                for layer in 0..d.num_layers {
+                    self.blit_level(texture, level - 1, layer, dw, dh);
+                }
+                w = dw;
+                h = dh;
+            }
+        }
+    }
+
+    fn blit_level(&mut self, texture: &Texture, src_level: u32, plane: u32, dw: u32, dh: u32) {
+        // Source coordinates are exactly double the destination's, so the
+        // bilinear filter always samples the aligned 2x2 texel quad.
+        let source = BlitRegion {
+            texture: texture.clone(),
+            mip_level: src_level,
+            layer_or_depth_plane: plane,
+            x: 0,
+            y: 0,
+            w: dw * 2,
+            h: dh * 2,
+        };
+        let destination = BlitRegion {
+            texture: texture.clone(),
+            mip_level: src_level + 1,
+            layer_or_depth_plane: plane,
+            x: 0,
+            y: 0,
+            w: dw,
+            h: dh,
+        };
+        let info = BlitInfo {
+            source,
+            destination,
+            load_op: SDL_GPULoadOp::DONT_CARE,
+            clear_color: SDL_FColor {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            flip_mode: SDL_FlipMode::NONE,
+            filter: SDL_GPUFilter::LINEAR,
+            cycle: false,
+        };
+        self.blit_texture(&info);
     }
 }
 
